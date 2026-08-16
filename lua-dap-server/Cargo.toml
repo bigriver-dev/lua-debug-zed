@@ -1,0 +1,15 @@
+[package]
+name = "lua-dap-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dap = "0.4.1-alpha1"
+# 'vendored' compiles Lua directly into your Rust binary.
+mlua = { version = "0.9", features = ["lua53", "vendored"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"

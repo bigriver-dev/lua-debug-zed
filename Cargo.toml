@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "zed-extension",
+    "lua-dap-server",
+]
+resolver = "2"

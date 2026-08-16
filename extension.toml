@@ -1,0 +1,11 @@
+id = "lua-debugger"
+name = "Lua debugger for Zed"
+description = "DAP support for Lua in Zed"
+version = "0.1.0"
+schema_version = 1
+authors = ["Simon Spivey <simon@spivey.net>"]
+repository = "https://github.com/bigriver-dev/lua-debug-zed"
+
+[debug_adapters.lua]
+name = "Lua Debug Adapter"
+language = "lua"

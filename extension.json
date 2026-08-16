@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Lua Debug Configuration",
+  "type": "object",
+  "required": ["request"],
+  "properties": {
+    "request": {
+      "type": "string",
+      "enum": ["launch", "attach"],
+      "description": "Request type of this launch configuration"
+    },
+    "program": {
+      "type": "string",
+      "description": "Absolute path to the Lua file to debug"
+    },
+    "stopOnEntry": {
+      "type": "boolean",
+      "default": false,
+      "description": "Automatically stop after launch"
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Working directory"
+    },
+    "args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Command line arguments"
+    }
+  }
+}
