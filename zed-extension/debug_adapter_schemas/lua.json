@@ -26,6 +26,11 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Command line arguments"
+    },
+    "preloadPaths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Folders whose .lua files and .dll/.so C modules are automatically loaded into the global table before the debug target runs. .dll/.so files must export a luaopen_<filename> entry point (the standard Lua C-module convention)."
     }
   }
 }
