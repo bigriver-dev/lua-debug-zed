@@ -23,13 +23,14 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 struct PendingLaunch {
     program_path: PathBuf,
     dll_dir: Option<PathBuf>,
     preload_dirs: Vec<PathBuf>,
     cmd_rx: Receiver<ExecutionCommand>,
-    event_tx: Sender<RunnerEvent>,
+    event_tx: UnboundedSender<RunnerEvent>,
 }
 
 pub struct DapSession<R, W> {
@@ -37,7 +38,7 @@ pub struct DapSession<R, W> {
     seq: i64,
     breakpoints: Arc<Mutex<BreakpointRegistry>>,
     cmd_sender: Option<Sender<ExecutionCommand>>,
-    event_receiver: Option<Receiver<RunnerEvent>>,
+    event_receiver: Option<UnboundedReceiver<RunnerEvent>>,
     pending_launch: Option<PendingLaunch>,
 }
 
@@ -62,13 +63,18 @@ where
      */
     pub async fn run_loop(&mut self) -> Result<()> {
         loop {
-            // Drain runner events first
-            self.drain_runner_events().await?;
-
-            // Read next incoming DAP message
-            let raw_msg = match self.transport.read_msg().await? {
-                Some(msg) => msg,
-                None => break, // EOF
+            let raw_msg = tokio::select! {
+                msg = self.transport.read_msg() => match msg? {
+                    Some(m) => m,
+                    None => break, // EOF
+                },
+                event = Self::recv_runner_event(&mut self.event_receiver) => {
+                    match event {
+                        Some(event) => self.handle_runner_event(event).await?,
+                        None => self.event_receiver = None,
+                    }
+                    continue;
+                },
             };
 
             //log for debugging this piece of sugar honey iced tea
@@ -101,22 +107,16 @@ where
     }
 
     /*
-     * process all events in the queue
+     * wait on the runner event channel when one exists
+     * (before, this was drain all events which lead to a race condition)
      */
-    async fn drain_runner_events(&mut self) -> Result<()> {
-        let mut events = Vec::new();
-
-        if let Some(ref rx) = self.event_receiver {
-            while let Ok(event_msg) = rx.try_recv() {
-                events.push(event_msg);
-            }
+    async fn recv_runner_event(
+        rx: &mut Option<UnboundedReceiver<RunnerEvent>>,
+    ) -> Option<RunnerEvent> {
+        match rx {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending().await,
         }
-
-        for event in events {
-            self.handle_runner_event(event).await?;
-        }
-
-        Ok(())
     }
 
     /*
@@ -166,7 +166,7 @@ where
                     serde_json::from_value(req.arguments.unwrap_or_default())?;
 
                 let (cmd_tx, cmd_rx) = unbounded();
-                let (event_tx, event_rx) = unbounded();
+                let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
                 self.cmd_sender = Some(cmd_tx);
                 self.event_receiver = Some(event_rx);

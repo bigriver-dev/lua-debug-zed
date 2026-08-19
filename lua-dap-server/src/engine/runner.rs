@@ -6,6 +6,7 @@ use mlua::{HookTriggers, Lua, Result, Table, Value, VmState};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub enum ExecutionCommand {
     Continue,
@@ -82,7 +83,7 @@ impl LuaRunner {
         c_dll_dir: Option<&Path>,
         preload_dirs: &[PathBuf],
         cmd_receiver: crossbeam_channel::Receiver<ExecutionCommand>,
-        event_sender: Sender<RunnerEvent>,
+        event_sender: UnboundedSender<RunnerEvent>,
     ) -> Result<()> {
         let hook_event_sender = event_sender.clone();
         let result = (|| -> Result<()> {
@@ -156,7 +157,7 @@ impl LuaRunner {
      * Scans a folder (non-recursively) for .lua and .dll/.so files;
      * loads each into a global named after its filename
      */
-    fn preload_directory(lua: &Lua, dir: &Path, event_sender: &Sender<RunnerEvent>) {
+    fn preload_directory(lua: &Lua, dir: &Path, event_sender: &UnboundedSender<RunnerEvent>) {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(err) => {
@@ -228,7 +229,7 @@ impl LuaRunner {
         step_mode: &Arc<Mutex<StepMode>>,
         stack_depth: &Arc<Mutex<usize>>,
         cmd_receiver: &Receiver<ExecutionCommand>,
-        event_sender: &Sender<RunnerEvent>,
+        event_sender: &UnboundedSender<RunnerEvent>,
     ) -> Result<()> {
         let event = debug.event();
 
