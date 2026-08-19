@@ -84,15 +84,25 @@ impl Event {
     }
 
     pub fn stopped(reason: &str, thread_id: i64) -> Self {
+        Self::stopped_with_text(reason, thread_id, None)
+    }
+
+    // on error/assert, show text of exception
+    pub fn stopped_with_text(reason: &str, thread_id: i64, text: Option<String>) -> Self {
+        let mut body = serde_json::json!({
+            "reason": reason,
+            "threadId": thread_id,
+            "allThreadsStopped": true
+        });
+        if let Some(text) = text {
+            body["text"] = serde_json::Value::String(text.clone());
+            body["description"] = serde_json::Value::String(text);
+        }
         Self {
             seq: 0,
             raw_type: "event".to_string(),
             event: "stopped".to_string(),
-            body: Some(serde_json::json!({
-                "reason": reason,
-                "threadId": thread_id,
-                "allThreadsStopped": true
-            })),
+            body: Some(body),
         }
     }
 

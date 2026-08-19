@@ -36,8 +36,13 @@ pub enum ExecutionCommand {
 
 #[derive(Debug, Clone)]
 pub enum RunnerEvent {
-    Stopped { reason: &'static str },
-    Terminated { error: Option<String> },
+    Stopped {
+        reason: &'static str,
+        message: Option<String>,
+    },
+    Terminated {
+        error: Option<String>,
+    },
     Output(String),
 }
 
@@ -106,6 +111,13 @@ impl LuaRunner {
             let step_mode = Arc::new(Mutex::new(StepMode::None));
             let stack_depth = Arc::new(Mutex::new(0usize));
 
+            // Clone what the xpcall error handler (below) needs before the
+            // hook closure moves the originals.
+            let error_cmd_receiver = cmd_receiver.clone();
+            let error_step_mode = Arc::clone(&step_mode);
+            let error_stack_depth = Arc::clone(&stack_depth);
+            let error_event_sender = event_sender.clone();
+
             // Register safe Rust debug hook
             let bps = Arc::clone(&self.breakpoints);
             self.lua.set_hook(
@@ -138,10 +150,34 @@ impl LuaRunner {
             let code = std::fs::read_to_string(script_path)
                 .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
 
-            self.lua
+            let chunk_fn = self
+                .lua
                 .load(&code)
                 .set_name(script_path.to_string_lossy())
-                .exec()
+                .into_function()?;
+
+            let error_handler = self.lua.create_function(move |lua, err: Value| {
+                let message = Evaluator::format_lua_error_value(lua, &err);
+                let base_level = Evaluator::find_error_frame_level(lua);
+                let depth = *error_stack_depth.lock();
+                Self::pause_and_wait(
+                    lua,
+                    "exception",
+                    Some(message),
+                    depth,
+                    base_level,
+                    &error_step_mode,
+                    &error_cmd_receiver,
+                    &error_event_sender,
+                );
+                Ok(err)
+            })?;
+
+            let xpcall_fn: mlua::Function = self.lua.globals().get("xpcall")?;
+            // Discard (ok, err) deliberately: a caught failure was already found
+            let _: (bool, Value) = xpcall_fn.call((chunk_fn, error_handler))?;
+
+            Ok(())
         })();
 
         // prevent hangs or other weird stuff by terminate signal
@@ -284,25 +320,45 @@ impl LuaRunner {
         // reset step mode upon hitting a pause condition
         *step_mode.lock() = StepMode::None;
 
-        // references from a previous stop shouldn't resolve once execution has moved on.
-        let mut table_registry = TableRegistry::new();
-
-        // notify DAP session of stop reason
         let reason = if is_breakpoint_hit {
             "breakpoint"
         } else {
             "step"
         };
-        let _ = event_sender.send(RunnerEvent::Stopped { reason });
 
-        /*
-         * block execution thread until DAP sends a command that actually resumes execution:
-         * Continue
-         * StepOver
-         * StepIn
-         * StepOut
-         * GetStackTrace
-         */
+        Self::pause_and_wait(
+            _lua,
+            reason,
+            None,
+            current_depth,
+            0,
+            step_mode,
+            cmd_receiver,
+            event_sender,
+        );
+
+        Ok(())
+    }
+
+    /*
+     * pauses running script
+     * sends a "stopped" event with the given reason
+     * blocks the calling thread until client sends
+     * (Continue/StepOver/StepIn/StepOut)
+     */
+    fn pause_and_wait(
+        lua: &Lua,
+        reason: &'static str,
+        message: Option<String>,
+        current_depth: usize,
+        base_level: usize,
+        step_mode: &Mutex<StepMode>,
+        cmd_receiver: &Receiver<ExecutionCommand>,
+        event_sender: &UnboundedSender<RunnerEvent>,
+    ) {
+        let mut table_registry = TableRegistry::new();
+        let _ = event_sender.send(RunnerEvent::Stopped { reason, message });
+
         loop {
             match cmd_receiver.recv() {
                 Ok(ExecutionCommand::Continue) => {
@@ -326,7 +382,7 @@ impl LuaRunner {
                     break;
                 }
                 Ok(ExecutionCommand::GetStackTrace { responder }) => {
-                    let frames = Self::capture_frames(_lua);
+                    let frames = Self::capture_frames(lua, base_level);
                     let _ = responder.send(frames);
                     // Stay paused, wait for the next command.
                 }
@@ -334,13 +390,17 @@ impl LuaRunner {
                     frame_id,
                     responder,
                 }) => {
-                    let vars = Evaluator::get_frame_variables(_lua, frame_id, &mut table_registry)
-                        .unwrap_or_default();
+                    let vars = Evaluator::get_frame_variables(
+                        lua,
+                        frame_id,
+                        base_level,
+                        &mut table_registry,
+                    )
+                    .unwrap_or_default();
                     let _ = responder.send(vars);
                 }
                 Ok(ExecutionCommand::GetGlobals { responder }) => {
-                    let vars =
-                        Evaluator::get_globals(_lua, &mut table_registry).unwrap_or_default();
+                    let vars = Evaluator::get_globals(lua, &mut table_registry).unwrap_or_default();
                     let _ = responder.send(vars);
                 }
                 Ok(ExecutionCommand::GetTableContents {
@@ -356,8 +416,9 @@ impl LuaRunner {
                     responder,
                 }) => {
                     let result = Evaluator::evaluate_expression(
-                        _lua,
+                        lua,
                         frame_id,
+                        base_level,
                         &expression,
                         &mut table_registry,
                     )
@@ -370,16 +431,14 @@ impl LuaRunner {
                 }
             }
         }
-
-        Ok(())
     }
 
     /*
      * walk the Lua call stack
      */
-    pub fn capture_frames(lua: &Lua) -> Vec<DapStackFrame> {
+    pub fn capture_frames(lua: &Lua, base_level: usize) -> Vec<DapStackFrame> {
         let mut frames = Vec::new();
-        let mut level = 0usize;
+        let mut level = base_level;
 
         while let Some(frame) = lua.inspect_stack(level, |info| {
             let name = info
@@ -395,7 +454,7 @@ impl LuaRunner {
             let line = info.current_line().unwrap_or(0);
 
             DapStackFrame {
-                id: level,
+                id: level - base_level,
                 name,
                 source_path,
                 line,

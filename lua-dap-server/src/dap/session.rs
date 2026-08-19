@@ -40,6 +40,7 @@ pub struct DapSession<R, W> {
     cmd_sender: Option<Sender<ExecutionCommand>>,
     event_receiver: Option<UnboundedReceiver<RunnerEvent>>,
     pending_launch: Option<PendingLaunch>,
+    last_exception: Option<String>,
 }
 
 impl<R, W> DapSession<R, W>
@@ -55,6 +56,7 @@ where
             cmd_sender: None,
             event_receiver: None,
             pending_launch: None,
+            last_exception: None,
         }
     }
 
@@ -124,8 +126,16 @@ where
      */
     async fn handle_runner_event(&mut self, event: RunnerEvent) -> Result<()> {
         match event {
-            RunnerEvent::Stopped { reason } => {
-                self.send_event(Event::stopped(reason, 1)).await?;
+            RunnerEvent::Stopped { reason, message } => {
+                self.last_exception = message.clone();
+                if reason == "exception" {
+                    if let Some(ref text) = message {
+                        let body = json!({ "category": "stderr", "output": format!("Uncaught error: {}\n", text) });
+                        self.send_event(Event::new("output", Some(body))).await?;
+                    }
+                }
+                self.send_event(Event::stopped_with_text(reason, 1, message))
+                    .await?;
             }
             RunnerEvent::Terminated { error } => {
                 if let Some(message) = error {
@@ -155,6 +165,7 @@ where
                     "supportsConfigurationDoneRequest": true,
                     "supportsEvaluateForHovers": true,
                     "supportsConditionalBreakpoints": true,
+                    "supportsExceptionInfoRequest": true,
                 });
                 self.send_response(Response::success(request_seq, &command, Some(capabilities)))
                     .await?;
@@ -247,6 +258,20 @@ where
 
             "setExceptionBreakpoints" => {
                 self.send_response(Response::success(request_seq, &command, None))
+                    .await?;
+            }
+
+            "exceptionInfo" => {
+                let description = self
+                    .last_exception
+                    .clone()
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                let body = json!({
+                    "exceptionId": "lua-runtime-error",
+                    "description": description,
+                    "breakMode": "unhandled",
+                });
+                self.send_response(Response::success(request_seq, &command, Some(body)))
                     .await?;
             }
 

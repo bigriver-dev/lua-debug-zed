@@ -50,6 +50,7 @@ impl Evaluator {
     pub fn get_frame_variables(
         lua: &Lua,
         frame_level: usize,
+        base_level: usize,
         registry: &mut TableRegistry,
     ) -> Result<Vec<DapVariable>> {
         let mut vars = Vec::new();
@@ -61,7 +62,7 @@ impl Evaluator {
         let mut i = 1;
         // Lua stack frame levels in debug.getlocal are 1-based...
         while let Ok((maybe_name, value)) =
-            getlocal.call::<(Option<String>, Value)>((frame_level + 1, i))
+            getlocal.call::<(Option<String>, Value)>((base_level + frame_level + 1, i))
         {
             match maybe_name {
                 Some(name) => {
@@ -122,6 +123,7 @@ impl Evaluator {
     pub fn evaluate_expression(
         lua: &mlua::Lua,
         frame_level: usize,
+        base_level: usize,
         expr: &str,
         registry: &mut TableRegistry,
     ) -> Result<DapVariable> {
@@ -141,7 +143,7 @@ impl Evaluator {
 
         let mut i = 1;
         while let Ok((maybe_name, value)) =
-            getlocal.call::<(Option<String>, Value)>((frame_level + 1, i))
+            getlocal.call::<(Option<String>, Value)>((base_level + frame_level + 1, i))
         {
             match maybe_name {
                 Some(name) => {
@@ -162,6 +164,36 @@ impl Evaluator {
             &result,
             registry,
         ))
+    }
+
+    /*
+     * Finds the inspect_stack level of the Lua frame that actually raised an error
+     */
+    pub fn find_error_frame_level(lua: &Lua) -> usize {
+        for level in 0..64 {
+            match lua.inspect_stack(level, |info| info.current_line().is_some()) {
+                Some(true) => return level,
+                Some(false) => continue,
+                None => break,
+            }
+        }
+        0
+    }
+
+    /*
+     * error/assert with a string message, or a runtime error
+     * error() can raise any value, so fall back to Lua's own tostring.
+     */
+    pub fn format_lua_error_value(lua: &Lua, val: &Value) -> String {
+        if let Value::String(s) = val {
+            return s.to_string_lossy();
+        }
+        if let Ok(tostring) = lua.globals().get::<Function>("tostring") {
+            if let Ok(s) = tostring.call::<String>(val.clone()) {
+                return s;
+            }
+        }
+        format!("{:?}", val)
     }
 
     /*
