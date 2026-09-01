@@ -19,11 +19,39 @@ Features:
 
 1.) `rustup target add wasm32-wasip2` (This is required to install a local zed extension)
 
-2.) Download `lua-debugger-extension-source.zip`; If limited internet access, you can download the binary too `lua-dap-xxx.zip`
+2.) Download `lua-debugger-extension-source.zip` & the binary `lua-dap-xxx.zip` for your OS.
 
-3.) unzip extension. open up zed `extensions`. top-right, select `install dev extension`. point it to the unzipped folder.
+3.) Unzip Extension. In the extracted folder, run `cargo build --target wasm32-wasip2 --release`
 
-> This will attempt to download the correct binaries for your machine.
+4.) Open up zed `extensions`. top-right, select `install dev extension`. point it to the unzipped folder.
+
+5.) Unzip `lua-dap-xxx.zip`. In the Zed `settings.json` point to the directory like as follows:
+
+```json
+{
+  "dap": {
+    "lua": {
+      "binary": "C:\\Users\\User\\Documents\\GitHub\\lua-debug-zed\\dap-binary",
+    }
+  }
+}
+```
+
+6.) Then open the directory that you want to debug lua. In that directory create `.zed/debug.json`. Add as follows:
+```json
+[
+    {
+      "adapter": "lua",
+      "label": "Debug a Lua script",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.lua",
+      "stopOnEntry": false,
+      "preloadPaths": ["${workspaceFolder}/lib"],
+      "luaVersion": "5.3"
+    }
+]
+```
+
 
 # Building 
 
@@ -47,20 +75,6 @@ Features:
 4.) build dap server `cargo build --bin lua-dap-server`
 
 5.) create `debug.json` file in the directory
-
-```json
-[
-    {
-      "adapter": "lua",
-      "label": "Debug a Lua script",
-      "request": "launch",
-      "program": "${workspaceFolder}/main.lua",
-      "stopOnEntry": false,
-      "preloadPaths": ["${workspaceFolder}/debug"],
-      "luaVersion": "5.3"
-    }
-]
-```
 
 # Debugging DAP
 

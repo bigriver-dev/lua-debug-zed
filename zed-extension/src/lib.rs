@@ -133,7 +133,16 @@ impl zed::Extension for LuaDebugExtension {
         //     .unwrap_or_else(|| format!("{}/target/debug/{}", root_path, binary_name));
 
         let command = match user_provided_debug_adapter_path {
-            Some(path) => path,
+            Some(dir) => {
+                let (os, _arch) = zed::current_platform();
+                let ext = if matches!(os, zed::Os::Windows) {
+                    ".exe"
+                } else {
+                    ""
+                };
+                let feature = lua_feature_name(&lua_version);
+                format!("{dir}/lua-dap-server-{feature}{ext}")
+            }
             None => resolve_binary(&lua_version)?,
         };
 

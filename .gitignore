@@ -6,3 +6,4 @@ lua-dap-server-trace.log
 .zed
 main.lua
 debug
+dap-binary
