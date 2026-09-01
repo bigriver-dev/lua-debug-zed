@@ -27,6 +27,12 @@
       "items": { "type": "string" },
       "description": "Command line arguments"
     },
+    "luaVersion": {
+      "type": "string",
+      "enum": ["5.1", "5.2", "5.3", "5.4", "5.5", "luajit"],
+      "default": "5.3",
+      "description": "Which Lua version's lua-dap-server build to launch. Downloaded automatically from GitHub Releases on first use, per platform."
+    },
     "preloadPaths": {
       "type": "array",
       "items": { "type": "string" },

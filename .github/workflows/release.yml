@@ -1,0 +1,66 @@
+name: Release lua-dap-server binaries
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            os_name: windows
+            arch_name: x86_64
+            ext: ".exe"
+          - os: macos-latest
+            os_name: macos
+            arch_name: aarch64
+            ext: ""
+          - os: ubuntu-latest
+            os_name: linux
+            arch_name: x86_64
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build all Lua versions
+        shell: bash
+        run: |
+          mkdir -p dist
+          for feature in lua51 lua52 lua53 lua54 lua55 luajit; do
+            cargo build --release -p lua-dap-server --no-default-features --features "$feature"
+            cp "target/release/lua-dap-server${{ matrix.ext }}" "dist/lua-dap-server-${feature}${{ matrix.ext }}"
+          done
+
+      - name: Zip platform bundle
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "../lua-dap-server-${{ matrix.os_name }}-${{ matrix.arch_name }}.zip" *
+          else
+            zip "../lua-dap-server-${{ matrix.os_name }}-${{ matrix.arch_name }}.zip" *
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lua-dap-server-${{ matrix.os_name }}-${{ matrix.arch_name }}
+          path: lua-dap-server-*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
