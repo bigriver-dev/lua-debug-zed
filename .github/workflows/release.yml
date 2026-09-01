@@ -89,8 +89,26 @@ jobs:
           name: lua-dap-server-${{ matrix.os_name }}-${{ matrix.arch_name }}
           path: lua-dap-server-*.zip
 
+  package-extension-source:
+      needs: check-version
+      if: needs.check-version.outputs.should_release == 'true'
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Zip extension source
+          shell: bash
+          run: |
+            cd zed-extension
+            zip -r "../lua-debugger-extension-source.zip" extension.toml Cargo.toml Cargo.lock src debug_adapter_schemas
+
+        - uses: actions/upload-artifact@v4
+          with:
+            name: lua-debugger-extension-source
+            path: lua-debugger-extension-source.zip
+
   release:
-    needs: [check-version, build]
+    needs: [check-version, build, package-extension-source]
     runs-on: ubuntu-latest
     permissions:
       contents: write
