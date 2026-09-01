@@ -41,6 +41,8 @@ jobs:
           git tag "v${{ steps.check.outputs.version }}"
           git push origin "v${{ steps.check.outputs.version }}"
   build:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -100,4 +102,5 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.check-version.outputs.version }}
           files: dist/*.zip
