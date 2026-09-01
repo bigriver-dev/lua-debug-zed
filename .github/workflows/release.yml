@@ -4,7 +4,7 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "zed-extension/Cargo.toml"
+      - "zed-extension/extension.toml"
 
 jobs:
   check-version:
@@ -23,7 +23,7 @@ jobs:
         id: check
         shell: bash
         run: |
-          VERSION=$(grep -m1 '^version' zed-extension/Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
+          VERSION=$(grep -m1 '^version' zed-extension/extension.toml | sed -E 's/version *= *"([^"]+)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if git rev-parse "v$VERSION" >/dev/null 2>&1; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
