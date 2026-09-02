@@ -13,7 +13,7 @@
 
 use crate::dap::protocol::*;
 use crate::dap::transport::DapTransport;
-use crate::engine::breakpoints::BreakpointRegistry;
+use crate::engine::breakpoints::{BreakpointRegistry, FunctionBreakpointRegistry};
 use crate::engine::runner::{ExecutionCommand, LuaRunner, RunnerEvent};
 
 use anyhow::Result;
@@ -37,6 +37,7 @@ pub struct DapSession<R, W> {
     transport: DapTransport<R, W>,
     seq: i64,
     breakpoints: Arc<Mutex<BreakpointRegistry>>,
+    function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
     cmd_sender: Option<Sender<ExecutionCommand>>,
     event_receiver: Option<UnboundedReceiver<RunnerEvent>>,
     pending_launch: Option<PendingLaunch>,
@@ -53,6 +54,7 @@ where
             transport: DapTransport::new(reader, writer),
             seq: 1,
             breakpoints: Arc::new(Mutex::new(BreakpointRegistry::new())),
+            function_breakpoints: Arc::new(Mutex::new(FunctionBreakpointRegistry::new())),
             cmd_sender: None,
             event_receiver: None,
             pending_launch: None,
@@ -203,13 +205,17 @@ where
                 if let Some(path_str) = args.source.path {
                     let path = PathBuf::from(&path_str);
 
-                    // Extract line numbers into a Vec<usize>
-                    let lines: Vec<usize> = args.breakpoints.iter().map(|bp| bp.line).collect();
+                    // dump all breakpoints
+                    let entries: Vec<(usize, Option<String>)> = args
+                        .breakpoints
+                        .iter()
+                        .map(|bp| (bp.line, bp.condition.clone()))
+                        .collect();
 
                     // set_breakpoints based on line numbers
                     {
                         let mut registry = self.breakpoints.lock();
-                        registry.set_breakpoints(path.clone(), lines);
+                        registry.set_breakpoints(path.clone(), entries);
                     }
 
                     // DAP response verification payloads
@@ -235,7 +241,8 @@ where
             "configurationDone" => {
                 if let Some(pending) = self.pending_launch.take() {
                     let bps = Arc::clone(&self.breakpoints);
-                    std::thread::spawn(move || match LuaRunner::new(bps) {
+                    let func_bps = Arc::clone(&self.function_breakpoints);
+                    std::thread::spawn(move || match LuaRunner::new(bps, func_bps) {
                         Ok(runner) => {
                             let _ = runner.execute_script(
                                 &pending.program_path,
@@ -276,7 +283,29 @@ where
             }
 
             "setFunctionBreakpoints" => {
-                let body = json!({ "breakpoints": Vec::<Breakpoint>::new() });
+                let args: SetFunctionBreakpointsArguments =
+                    serde_json::from_value(req.arguments.unwrap_or_default())?;
+
+                let entries: Vec<(String, Option<String>)> = args
+                    .breakpoints
+                    .iter()
+                    .map(|bp| (bp.name.clone(), bp.condition.clone()))
+                    .collect();
+
+                let verified = vec![
+                    Breakpoint {
+                        id: None,
+                        verified: true,
+                        message: None,
+                        source: None,
+                        line: None,
+                    };
+                    args.breakpoints.len()
+                ];
+
+                self.function_breakpoints.lock().set_breakpoints(entries);
+
+                let body = json!({ "breakpoints": verified });
                 self.send_response(Response::success(request_seq, &command, Some(body)))
                     .await?;
             }

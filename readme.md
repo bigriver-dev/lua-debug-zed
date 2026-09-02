@@ -7,8 +7,8 @@ Features:
 - load external dynamic libraries (.dll/.so)
 - version support (`5.1-5.5+luajit`)
 - breakpoints
-- function breakpoints (+TODO)
-- conditional breakpoints (+TODO)
+- function breakpoints (this is implemented, but zed currently doesn't support this.)
+- conditional breakpoints
 - variable
 - step over, step in, step out
 - watches
@@ -64,7 +64,7 @@ Features:
 > Build debug server
 `cargo build -p lua-dap-server --release`
 
-# Zed Installation for Developing
+# Zed Extension Installation for Developing
 
 1.) Clone repo
 
@@ -72,9 +72,25 @@ Features:
 
 3.) open up zed `extensions`. Top-right, select `install dev extension`. Point it to the `./zed-extension` directory of this project
 
-4.) build dap server `cargo build --bin lua-dap-server`
+4.) build dap server `cargo build -p lua-dap-server --bin lua-dap-server`. Defaults to lua53, change `Cargo.toml` to build another version.
 
-5.) create `debug.json` file in the directory
+5.) create `debug.json` file in the directory like as follows:
+```json
+[
+    {
+      "adapter": "lua",
+      "label": "Debug a Lua script",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.lua",
+      "stopOnEntry": false,
+      "preloadPaths": ["${workspaceFolder}/lib"],
+      "debugServerPath": "${workspaceFolder}/target/debug/lua-dap-server.exe",
+      "luaVersion": "5.3"
+    }
+]
+```
+
+Where `debugServerPath` points to binary generated from lua-dap-server. This variable overwrites `luaVersion` and anything in `settings.json`.
 
 # Debugging DAP
 

@@ -1,4 +1,4 @@
-use crate::engine::breakpoints::BreakpointRegistry;
+use crate::engine::breakpoints::{BreakpointRegistry, FunctionBreakpointRegistry};
 use crate::engine::evaluator::{DapVariable, Evaluator, TableRegistry};
 use crossbeam_channel::{Receiver, Sender};
 use mlua::debug::{Debug as LuaDebug, DebugEvent};
@@ -65,18 +65,26 @@ pub enum StepMode {
 pub struct LuaRunner {
     lua: Lua,
     breakpoints: Arc<Mutex<BreakpointRegistry>>,
+    function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
 }
 
 impl LuaRunner {
     /*
      * Instantiates the Lua runtime
      */
-    pub fn new(breakpoints: Arc<Mutex<BreakpointRegistry>>) -> Result<Self> {
+    pub fn new(
+        breakpoints: Arc<Mutex<BreakpointRegistry>>,
+        function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
+    ) -> Result<Self> {
         // let lua = Lua::new();
         // required! The created Lua state will not have safety guarantees and will allow to load C modules.
         // https://docs.rs/mlua/latest/mlua/struct.Lua.html#method.unsafe_new
         let lua = unsafe { Lua::unsafe_new() };
-        Ok(Self { lua, breakpoints })
+        Ok(Self {
+            lua,
+            breakpoints,
+            function_breakpoints,
+        })
     }
 
     /*
@@ -120,6 +128,7 @@ impl LuaRunner {
 
             // Register safe Rust debug hook
             let bps = Arc::clone(&self.breakpoints);
+            let func_bps = Arc::clone(&self.function_breakpoints);
             self.lua.set_hook(
                 HookTriggers {
                     every_line: true,
@@ -132,6 +141,7 @@ impl LuaRunner {
                         lua,
                         &debug,
                         &bps,
+                        &func_bps,
                         &step_mode,
                         &stack_depth,
                         &cmd_receiver,
@@ -262,6 +272,7 @@ impl LuaRunner {
         _lua: &Lua,
         debug: &LuaDebug,
         breakpoints: &Arc<Mutex<BreakpointRegistry>>,
+        function_breakpoints: &Arc<Mutex<FunctionBreakpointRegistry>>,
         step_mode: &Arc<Mutex<StepMode>>,
         stack_depth: &Arc<Mutex<usize>>,
         cmd_receiver: &Receiver<ExecutionCommand>,
@@ -274,6 +285,32 @@ impl LuaRunner {
         match event {
             DebugEvent::Call | DebugEvent::TailCall => {
                 *depth += 1;
+                let current_depth = *depth;
+                drop(depth);
+
+                // Function breakpoints - check the name this call resolved to
+                if let Some(name) = debug.names().name {
+                    let matched = function_breakpoints.lock().condition_for(&name);
+                    if let Some(condition) = matched {
+                        let should_stop = match condition {
+                            Some(cond) => Evaluator::evaluate_condition(_lua, 0, 0, &cond),
+                            None => true,
+                        };
+                        if should_stop {
+                            *step_mode.lock() = StepMode::None;
+                            Self::pause_and_wait(
+                                _lua,
+                                "function breakpoint",
+                                None,
+                                current_depth,
+                                0,
+                                step_mode,
+                                cmd_receiver,
+                                event_sender,
+                            );
+                        }
+                    }
+                }
                 return Ok(());
             }
             DebugEvent::Ret => {
@@ -302,7 +339,17 @@ impl LuaRunner {
         // evaluate breakpoint or step conditions
         let is_breakpoint_hit = {
             let registry = breakpoints.lock();
-            registry.is_breakpoint(&src_path, line)
+            if !registry.is_breakpoint(&src_path, line) {
+                false
+            } else {
+                match registry.condition_for(&src_path, line) {
+                    Some(cond) => {
+                        drop(registry);
+                        Evaluator::evaluate_condition(_lua, 0, 0, &cond)
+                    }
+                    None => true,
+                }
+            }
         };
 
         let current_step = *step_mode.lock();

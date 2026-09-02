@@ -3,13 +3,13 @@
  * track line breakpoints for active sessions
  */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Clone)]
 pub struct BreakpointRegistry {
     // Maps normalized file paths to set of active line numbers
-    file_breakpoints: HashMap<PathBuf, HashSet<usize>>,
+    file_breakpoints: HashMap<PathBuf, HashMap<usize, Option<String>>>,
 }
 
 impl BreakpointRegistry {
@@ -20,10 +20,10 @@ impl BreakpointRegistry {
     /*
      * breakpoints for a given file and returns verification status
      */
-    pub fn set_breakpoints(&mut self, path: PathBuf, lines: Vec<usize>) {
+    pub fn set_breakpoints(&mut self, path: PathBuf, breakpoints: Vec<(usize, Option<String>)>) {
         let normalized = normalize_path(&path);
-        let set: HashSet<usize> = lines.into_iter().collect();
-        self.file_breakpoints.insert(normalized, set);
+        let map: HashMap<usize, Option<String>> = breakpoints.into_iter().collect();
+        self.file_breakpoints.insert(normalized, map);
     }
 
     /*
@@ -41,7 +41,41 @@ impl BreakpointRegistry {
         let normalized = normalize_path(path);
         self.file_breakpoints
             .get(&normalized)
-            .map_or(false, |lines| lines.contains(&line))
+            .is_some_and(|lines| lines.contains_key(&line))
+    }
+
+    /*
+     * conditional breakpoint entry
+     */
+    pub fn condition_for(&self, path: &Path, line: usize) -> Option<String> {
+        let normalized = normalize_path(path);
+        self.file_breakpoints
+            .get(&normalized)
+            .and_then(|lines| lines.get(&line))
+            .cloned()
+            .flatten()
+    }
+}
+
+/*
+ * similar to BreakpointRegistry, but bkps don't need any path
+ */
+#[derive(Debug, Default, Clone)]
+pub struct FunctionBreakpointRegistry {
+    functions: HashMap<String, Option<String>>,
+}
+
+impl FunctionBreakpointRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_breakpoints(&mut self, breakpoints: Vec<(String, Option<String>)>) {
+        self.functions = breakpoints.into_iter().collect();
+    }
+
+    pub fn condition_for(&self, name: &str) -> Option<Option<String>> {
+        self.functions.get(name).cloned()
     }
 }
 

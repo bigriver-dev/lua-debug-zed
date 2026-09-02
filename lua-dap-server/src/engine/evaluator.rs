@@ -53,29 +53,11 @@ impl Evaluator {
         base_level: usize,
         registry: &mut TableRegistry,
     ) -> Result<Vec<DapVariable>> {
-        let mut vars = Vec::new();
-
-        // Access Lua's standard `debug.getlocal` function via globals
-        let debug_table: Table = lua.globals().get("debug")?;
-        let getlocal: Function = debug_table.get("getlocal")?;
-
-        let mut i = 1;
-        // Lua stack frame levels in debug.getlocal are 1-based...
-        while let Ok((maybe_name, value)) =
-            getlocal.call::<(Option<String>, Value)>((base_level + frame_level + 1, i))
-        {
-            match maybe_name {
-                Some(name) => {
-                    if !name.starts_with('(') {
-                        vars.push(Self::format_dap_variable(name, &value, registry));
-                    }
-                }
-                None => break, // Reached end of local variables
-            }
-            i += 1;
-        }
-
-        Ok(vars)
+        let locals = Self::collect_frame_locals(lua, frame_level, base_level)?;
+        Ok(locals
+            .into_iter()
+            .map(|(name, value)| Self::format_dap_variable(name, &value, registry))
+            .collect())
     }
 
     /*
@@ -127,36 +109,8 @@ impl Evaluator {
         expr: &str,
         registry: &mut TableRegistry,
     ) -> Result<DapVariable> {
+        let env = Self::build_frame_env(lua, frame_level, base_level)?;
         let chunk_code = format!("return ({})", expr);
-
-        // create a sandboxed evaluation environment table
-        let env = lua.create_table()?;
-
-        // fall back to globals via metatable __index
-        let metatable = lua.create_table()?;
-        metatable.set("__index", lua.globals())?;
-        env.set_metatable(Some(metatable))?;
-
-        // collect frame locals into the environment table via debug.getlocal
-        let debug_table: Table = lua.globals().get("debug")?;
-        let getlocal: Function = debug_table.get("getlocal")?;
-
-        let mut i = 1;
-        while let Ok((maybe_name, value)) =
-            getlocal.call::<(Option<String>, Value)>((base_level + frame_level + 1, i))
-        {
-            match maybe_name {
-                Some(name) => {
-                    if !name.starts_with('(') {
-                        env.set(name, value)?;
-                    }
-                }
-                None => break,
-            }
-            i += 1;
-        }
-
-        // bind the environment to the compiled chunk and evaluate
         let result: Value = lua.load(&chunk_code).set_environment(env).eval()?;
 
         Ok(Self::format_dap_variable(
@@ -164,6 +118,72 @@ impl Evaluator {
             &result,
             registry,
         ))
+    }
+
+    /*
+     * walks debug.getlocal for a given frame
+     */
+    fn collect_frame_locals(
+        lua: &Lua,
+        frame_level: usize,
+        base_level: usize,
+    ) -> Result<Vec<(String, Value)>> {
+        let debug_table: Table = lua.globals().get("debug")?;
+        let getlocal: Function = debug_table.get("getlocal")?;
+
+        let mut locals = Vec::new();
+        let mut i = 1;
+        while let Ok((maybe_name, value)) =
+            getlocal.call::<(Option<String>, Value)>((base_level + frame_level + 1, i))
+        {
+            match maybe_name {
+                Some(name) => {
+                    if !name.starts_with('(') {
+                        locals.push((name, value));
+                    }
+                }
+                None => break,
+            }
+            i += 1;
+        }
+
+        Ok(locals)
+    }
+
+    /*
+     * Sandboxed environment table for a given frame: fallback to globals
+     */
+    fn build_frame_env(lua: &Lua, frame_level: usize, base_level: usize) -> Result<Table> {
+        let env = lua.create_table()?;
+        let metatable = lua.create_table()?;
+        metatable.set("__index", lua.globals())?;
+        env.set_metatable(Some(metatable))?;
+
+        for (name, value) in Self::collect_frame_locals(lua, frame_level, base_level)? {
+            env.set(name, value)?;
+        }
+
+        Ok(env)
+    }
+
+    /*
+     * Evaluate breakpoint returning lua truthy
+     */
+    pub fn evaluate_condition(
+        lua: &Lua,
+        frame_level: usize,
+        base_level: usize,
+        expr: &str,
+    ) -> bool {
+        let Ok(env) = Self::build_frame_env(lua, frame_level, base_level) else {
+            return false;
+        };
+        let chunk_code = format!("return ({})", expr);
+        match lua.load(&chunk_code).set_environment(env).eval::<Value>() {
+            Ok(Value::Nil) | Ok(Value::Boolean(false)) => false,
+            Ok(_) => true,
+            Err(_) => false,
+        }
     }
 
     /*

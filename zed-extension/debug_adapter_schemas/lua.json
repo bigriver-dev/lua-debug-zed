@@ -37,6 +37,10 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Folders whose .lua files and .dll/.so C modules are automatically loaded into the global table before the debug target runs. .dll/.so files must export a luaopen_<filename> entry point (the standard Lua C-module convention)."
+    },
+    "debugServerPath": {
+      "type": "string",
+      "description": "Advanced/testing: exact path to a lua-dap-server binary to launch directly, bypassing luaVersion resolution and the download/cache mechanism entirely. Mainly for testing a locally-built binary before it's part of a release."
     }
   }
 }

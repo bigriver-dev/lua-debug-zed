@@ -171,6 +171,21 @@ pub struct Breakpoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FunctionBreakpoint {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetFunctionBreakpointsArguments {
+    #[serde(default)]
+    pub breakpoints: Vec<FunctionBreakpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StackFrame {
     pub id: usize,
     pub name: String,

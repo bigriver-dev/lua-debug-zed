@@ -119,6 +119,11 @@ impl zed::Extension for LuaDebugExtension {
             .unwrap_or("5.3")
             .to_string();
 
+        let debug_server_path = parsed_config
+            .get("debugServerPath")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         let request = self.dap_request_kind(adapter_name, parsed_config)?;
 
         // debug code
@@ -132,20 +137,23 @@ impl zed::Extension for LuaDebugExtension {
         //     .or_else(|| worktree.which("lua-dap-server"))
         //     .unwrap_or_else(|| format!("{}/target/debug/{}", root_path, binary_name));
 
-        let command = match user_provided_debug_adapter_path {
-            Some(dir) => {
-                let (os, _arch) = zed::current_platform();
-                let ext = if matches!(os, zed::Os::Windows) {
-                    ".exe"
-                } else {
-                    ""
-                };
-                let feature = lua_feature_name(&lua_version);
-                format!("{dir}/lua-dap-server-{feature}{ext}")
+        let command = if let Some(path) = debug_server_path {
+            path
+        } else {
+            match user_provided_debug_adapter_path {
+                Some(dir) => {
+                    let (os, _arch) = zed::current_platform();
+                    let ext = if matches!(os, zed::Os::Windows) {
+                        ".exe"
+                    } else {
+                        ""
+                    };
+                    let feature = lua_feature_name(&lua_version);
+                    format!("{dir}/lua-dap-server-{feature}{ext}")
+                }
+                None => resolve_binary(&lua_version)?,
             }
-            None => resolve_binary(&lua_version)?,
         };
-
         Ok(zed::DebugAdapterBinary {
             command: Some(command),
             arguments: vec![],
