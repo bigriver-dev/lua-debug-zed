@@ -217,6 +217,56 @@ impl Evaluator {
     }
 
     /*
+     * peeks inside table contents to show preview of up to 20 chars
+     */
+    fn preview_table(t: &Table, count: &mut usize) -> String {
+        const PREVIEW_CHARS: usize = 20;
+        let mut preview = String::new();
+        let mut truncated = false;
+        for pair in t.pairs::<Value, Value>() {
+            let Ok((key, val)) = pair else { continue };
+            *count += 1;
+            if preview.chars().count() >= PREVIEW_CHARS {
+                truncated = true;
+                continue;
+            }
+            if !preview.is_empty() {
+                preview.push_str(", ");
+            }
+            preview.push_str(&Self::preview_entry(&key, &val));
+        }
+        if preview.chars().count() > PREVIEW_CHARS {
+            truncated = true;
+            preview = preview.chars().take(PREVIEW_CHARS).collect();
+        }
+        if truncated {
+            preview.push_str("...");
+        }
+        preview
+    }
+
+    /*
+     * format kv pair for preview_table
+     */
+    fn preview_entry(key: &Value, val: &Value) -> String {
+        let val_str = match val {
+            Value::Nil => "nil".to_string(),
+            Value::Boolean(b) => b.to_string(),
+            Value::Integer(i) => i.to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => format!("\"{}\"", s.to_string_lossy()),
+            Value::Table(_) => "table".to_string(),
+            Value::Function(_) => "function".to_string(),
+            _ => "?".to_string(),
+        };
+        match key {
+            Value::Integer(_) => val_str,
+            Value::String(s) => format!("{}={}", s.to_string_lossy(), val_str),
+            other => format!("{:?}={}", other, val_str),
+        }
+    }
+
+    /*
      * Formats an `mlua::Value` into a strongly typed `DapVariable` struct.
      */
     fn format_dap_variable(name: String, val: &Value, registry: &mut TableRegistry) -> DapVariable {
@@ -227,11 +277,23 @@ impl Evaluator {
             Value::Number(n) => (n.to_string(), "number", 0),
             Value::String(s) => (format!("\"{}\"", s.to_string_lossy()), "string", 0),
             Value::Table(t) => {
-                let count = t.pairs::<Value, Value>().count();
+                let mut count = 0usize;
+                let preview = Self::preview_table(t, &mut count);
                 let reference = registry.register(t.clone());
-                (format!("table ({} items)", count), "table", reference)
+                (
+                    format!("table ({} items) {{{}}}", count, preview),
+                    "table",
+                    reference,
+                )
             }
-            Value::Function(_) => ("function".to_string(), "function", 0),
+            Value::Function(f) => {
+                let label = if f.info().what == "C" {
+                    "C function"
+                } else {
+                    "function"
+                };
+                (label.to_string(), "function", 0)
+            }
             Value::UserData(_) => ("userdata".to_string(), "userdata", 0),
             Value::LightUserData(_) => ("lightuserdata".to_string(), "lightuserdata", 0),
             Value::Thread(_) => ("thread".to_string(), "thread", 0),
