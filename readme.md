@@ -12,6 +12,7 @@ Features:
 - exception breakpoints
 - upvalues
 - variables
+- set variables while breakpoint
 - step over, step in, step out
 - watches
 - evaluate expressions

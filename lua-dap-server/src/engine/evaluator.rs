@@ -125,15 +125,164 @@ impl Evaluator {
         expr: &str,
         registry: &mut TableRegistry,
     ) -> Result<DapVariable> {
-        let env = Self::build_frame_env(lua, frame_level, base_level)?;
-        let chunk_code = format!("return ({})", expr);
-        let result: Value = lua.load(&chunk_code).set_environment(env).eval()?;
+        let result = Self::eval_in_frame(lua, frame_level, base_level, expr)?;
 
         Ok(Self::format_dap_variable(
             expr.to_string(),
             &result,
             registry,
         ))
+    }
+
+    /*
+     * set local variable
+     */
+    pub fn set_local(
+        lua: &Lua,
+        frame_level: usize,
+        base_level: usize,
+        name: &str,
+        value_expr: &str,
+        registry: &mut TableRegistry,
+    ) -> Result<DapVariable> {
+        let new_value = Self::eval_in_frame(lua, frame_level, base_level, value_expr)?;
+        let level = base_level + frame_level + 1;
+
+        let debug_table: Table = lua.globals().get("debug")?;
+        let getlocal: Function = debug_table.get("getlocal")?;
+        let setlocal: Function = debug_table.get("setlocal")?;
+
+        let mut i = 1;
+        while let Ok((maybe_name, _)) = getlocal.call::<(Option<String>, Value)>((level, i)) {
+            match maybe_name {
+                Some(n) if n == name => {
+                    setlocal.call::<Value>((level, i, new_value.clone()))?;
+                    return Ok(Self::format_dap_variable(
+                        name.to_string(),
+                        &new_value,
+                        registry,
+                    ));
+                }
+                None => break,
+                _ => {}
+            }
+            i += 1;
+        }
+
+        Err(mlua::Error::RuntimeError(format!(
+            "local '{}' not found in this frame",
+            name
+        )))
+    }
+
+    /*
+     * set upvalue
+     */
+    pub fn set_upvalue(
+        lua: &Lua,
+        frame_level: usize,
+        base_level: usize,
+        name: &str,
+        value_expr: &str,
+        registry: &mut TableRegistry,
+    ) -> Result<DapVariable> {
+        let new_value = Self::eval_in_frame(lua, frame_level, base_level, value_expr)?;
+        let level = base_level + frame_level;
+        let Some(func) = lua.inspect_stack(level, |info| info.function()) else {
+            return Err(mlua::Error::RuntimeError("no such frame".to_string()));
+        };
+
+        let debug_table: Table = lua.globals().get("debug")?;
+        let getupvalue: Function = debug_table.get("getupvalue")?;
+        let setupvalue: Function = debug_table.get("setupvalue")?;
+
+        let mut i = 1;
+        while let Ok((maybe_name, _)) =
+            getupvalue.call::<(Option<String>, Value)>((func.clone(), i))
+        {
+            match maybe_name {
+                Some(n) if n == name => {
+                    setupvalue.call::<Value>((func.clone(), i, new_value.clone()))?;
+                    return Ok(Self::format_dap_variable(
+                        name.to_string(),
+                        &new_value,
+                        registry,
+                    ));
+                }
+                None => break,
+                _ => {}
+            }
+            i += 1;
+        }
+
+        Err(mlua::Error::RuntimeError(format!(
+            "upvalue '{}' not found in this frame",
+            name
+        )))
+    }
+
+    /*
+     * set a global; no frame needed
+     */
+    pub fn set_global(
+        lua: &Lua,
+        name: &str,
+        value_expr: &str,
+        registry: &mut TableRegistry,
+    ) -> Result<DapVariable> {
+        let chunk_code = format!("return ({})", value_expr);
+        let new_value: Value = lua.load(&chunk_code).eval()?;
+        lua.globals().set(name, new_value.clone())?;
+        Ok(Self::format_dap_variable(
+            name.to_string(),
+            &new_value,
+            registry,
+        ))
+    }
+
+    /*
+     * set key inside a previously-expanded table
+     */
+    pub fn set_table_value(
+        lua: &Lua,
+        registry: &mut TableRegistry,
+        table_ref: usize,
+        name: &str,
+        value_expr: &str,
+    ) -> Result<DapVariable> {
+        let Some(table) = registry.get(table_ref) else {
+            return Err(mlua::Error::RuntimeError(
+                "table no longer available".to_string(),
+            ));
+        };
+
+        let chunk_code = format!("return ({})", value_expr);
+        let new_value: Value = lua.load(&chunk_code).eval()?;
+
+        match name.parse::<i64>() {
+            Ok(idx) => table.set(idx, new_value.clone())?,
+            Err(_) => table.set(name, new_value.clone())?,
+        }
+
+        Ok(Self::format_dap_variable(
+            name.to_string(),
+            &new_value,
+            registry,
+        ))
+    }
+
+    /*
+     * shared eval used by evaluate_expression
+     */
+    fn eval_in_frame(
+        lua: &Lua,
+        frame_level: usize,
+        base_level: usize,
+        expr: &str,
+    ) -> Result<Value> {
+        let env = Self::build_frame_env(lua, frame_level, base_level)?;
+        let chunk_code = format!("return ({})", expr);
+        lua.load(&chunk_code).set_environment(env).eval()
     }
 
     /*

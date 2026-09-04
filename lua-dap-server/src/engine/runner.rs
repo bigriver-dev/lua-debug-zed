@@ -31,6 +31,29 @@ pub enum ExecutionCommand {
         table_ref: usize,
         responder: Sender<Vec<DapVariable>>,
     },
+    SetLocal {
+        frame_id: usize,
+        name: String,
+        value_expr: String,
+        responder: Sender<std::result::Result<DapVariable, String>>,
+    },
+    SetUpvalue {
+        frame_id: usize,
+        name: String,
+        value_expr: String,
+        responder: Sender<std::result::Result<DapVariable, String>>,
+    },
+    SetGlobal {
+        name: String,
+        value_expr: String,
+        responder: Sender<std::result::Result<DapVariable, String>>,
+    },
+    SetTableValue {
+        table_ref: usize,
+        name: String,
+        value_expr: String,
+        responder: Sender<std::result::Result<DapVariable, String>>,
+    },
     Evaluate {
         frame_id: usize,
         expression: String,
@@ -482,6 +505,66 @@ impl LuaRunner {
                 }) => {
                     let vars = Evaluator::get_table_contents(&mut table_registry, table_ref);
                     let _ = responder.send(vars);
+                }
+                Ok(ExecutionCommand::SetLocal {
+                    frame_id,
+                    name,
+                    value_expr,
+                    responder,
+                }) => {
+                    let result = Evaluator::set_local(
+                        lua,
+                        frame_id,
+                        base_level,
+                        &name,
+                        &value_expr,
+                        &mut table_registry,
+                    )
+                    .map_err(|e| e.to_string());
+                    let _ = responder.send(result);
+                }
+                Ok(ExecutionCommand::SetUpvalue {
+                    frame_id,
+                    name,
+                    value_expr,
+                    responder,
+                }) => {
+                    let result = Evaluator::set_upvalue(
+                        lua,
+                        frame_id,
+                        base_level,
+                        &name,
+                        &value_expr,
+                        &mut table_registry,
+                    )
+                    .map_err(|e| e.to_string());
+                    let _ = responder.send(result);
+                }
+                Ok(ExecutionCommand::SetGlobal {
+                    name,
+                    value_expr,
+                    responder,
+                }) => {
+                    let result =
+                        Evaluator::set_global(lua, &name, &value_expr, &mut table_registry)
+                            .map_err(|e| e.to_string());
+                    let _ = responder.send(result);
+                }
+                Ok(ExecutionCommand::SetTableValue {
+                    table_ref,
+                    name,
+                    value_expr,
+                    responder,
+                }) => {
+                    let result = Evaluator::set_table_value(
+                        lua,
+                        &mut table_registry,
+                        table_ref,
+                        &name,
+                        &value_expr,
+                    )
+                    .map_err(|e| e.to_string());
+                    let _ = responder.send(result);
                 }
                 Ok(ExecutionCommand::Evaluate {
                     frame_id,

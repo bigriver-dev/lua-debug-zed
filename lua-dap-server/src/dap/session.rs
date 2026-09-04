@@ -170,6 +170,7 @@ where
                     "supportsEvaluateForHovers": true,
                     "supportsConditionalBreakpoints": true,
                     "supportsExceptionInfoRequest": true,
+                    "supportsSetVariable": true,
                     "exceptionBreakpointFilters": [
                         {
                             "filter": "uncaught",
@@ -469,6 +470,91 @@ where
                 let body = json!({ "variables": vars });
                 self.send_response(Response::success(request_seq, &command, Some(body)))
                     .await?;
+            }
+
+            "setVariable" => {
+                let args = req.arguments.unwrap_or_default();
+                let var_ref = args
+                    .get("variablesReference")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let name = args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let value_expr = args
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                let mut set_result = None;
+                if let Some(ref tx) = self.cmd_sender {
+                    let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
+                    let sent = if var_ref >= 10000 {
+                        tx.send(ExecutionCommand::SetTableValue {
+                            table_ref: var_ref,
+                            name,
+                            value_expr,
+                            responder: resp_tx,
+                        })
+                        .is_ok()
+                    } else if var_ref >= 2000 {
+                        tx.send(ExecutionCommand::SetGlobal {
+                            name,
+                            value_expr,
+                            responder: resp_tx,
+                        })
+                        .is_ok()
+                    } else if var_ref >= 1500 {
+                        tx.send(ExecutionCommand::SetUpvalue {
+                            frame_id: var_ref - 1500,
+                            name,
+                            value_expr,
+                            responder: resp_tx,
+                        })
+                        .is_ok()
+                    } else if var_ref >= 1000 {
+                        tx.send(ExecutionCommand::SetLocal {
+                            frame_id: var_ref - 1000,
+                            name,
+                            value_expr,
+                            responder: resp_tx,
+                        })
+                        .is_ok()
+                    } else {
+                        false
+                    };
+
+                    if sent {
+                        set_result = resp_rx.recv().ok();
+                    }
+                }
+
+                match set_result {
+                    Some(Ok(var)) => {
+                        let body = json!({
+                            "value": var.value,
+                            "type": var.var_type,
+                            "variablesReference": var.variables_reference,
+                        });
+                        self.send_response(Response::success(request_seq, &command, Some(body)))
+                            .await?;
+                    }
+                    Some(Err(err)) => {
+                        self.send_response(Response::error(request_seq, &command, err))
+                            .await?;
+                    }
+                    None => {
+                        self.send_response(Response::error(
+                            request_seq,
+                            &command,
+                            "No active Lua execution to set variable against",
+                        ))
+                        .await?;
+                    }
+                }
             }
 
             "evaluate" => {
