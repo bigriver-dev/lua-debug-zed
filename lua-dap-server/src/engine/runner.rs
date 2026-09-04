@@ -20,6 +20,10 @@ pub enum ExecutionCommand {
         frame_id: usize,
         responder: Sender<Vec<DapVariable>>,
     },
+    GetUpvalues {
+        frame_id: usize,
+        responder: Sender<Vec<DapVariable>>,
+    },
     GetGlobals {
         responder: Sender<Vec<DapVariable>>,
     },
@@ -66,6 +70,7 @@ pub struct LuaRunner {
     lua: Lua,
     breakpoints: Arc<Mutex<BreakpointRegistry>>,
     function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
+    exception_breakpoints_enabled: Arc<Mutex<bool>>,
 }
 
 impl LuaRunner {
@@ -75,6 +80,7 @@ impl LuaRunner {
     pub fn new(
         breakpoints: Arc<Mutex<BreakpointRegistry>>,
         function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
+        exception_breakpoints_enabled: Arc<Mutex<bool>>,
     ) -> Result<Self> {
         // let lua = Lua::new();
         // required! The created Lua state will not have safety guarantees and will allow to load C modules.
@@ -84,6 +90,7 @@ impl LuaRunner {
             lua,
             breakpoints,
             function_breakpoints,
+            exception_breakpoints_enabled,
         })
     }
 
@@ -125,6 +132,7 @@ impl LuaRunner {
             let error_step_mode = Arc::clone(&step_mode);
             let error_stack_depth = Arc::clone(&stack_depth);
             let error_event_sender = event_sender.clone();
+            let error_exception_enabled = Arc::clone(&self.exception_breakpoints_enabled);
 
             // Register safe Rust debug hook
             let bps = Arc::clone(&self.breakpoints);
@@ -168,18 +176,23 @@ impl LuaRunner {
 
             let error_handler = self.lua.create_function(move |lua, err: Value| {
                 let message = Evaluator::format_lua_error_value(lua, &err);
-                let base_level = Evaluator::find_error_frame_level(lua);
-                let depth = *error_stack_depth.lock();
-                Self::pause_and_wait(
-                    lua,
-                    "exception",
-                    Some(message),
-                    depth,
-                    base_level,
-                    &error_step_mode,
-                    &error_cmd_receiver,
-                    &error_event_sender,
-                );
+                if *error_exception_enabled.lock() {
+                    let base_level = Evaluator::find_error_frame_level(lua);
+                    let depth = *error_stack_depth.lock();
+                    Self::pause_and_wait(
+                        lua,
+                        "exception",
+                        Some(message),
+                        depth,
+                        base_level,
+                        &error_step_mode,
+                        &error_cmd_receiver,
+                        &error_event_sender,
+                    );
+                } else {
+                    let _ = error_event_sender
+                        .send(RunnerEvent::Output(format!("Uncaught error: {}", message)));
+                }
                 Ok(err)
             })?;
 
@@ -438,6 +451,19 @@ impl LuaRunner {
                     responder,
                 }) => {
                     let vars = Evaluator::get_frame_variables(
+                        lua,
+                        frame_id,
+                        base_level,
+                        &mut table_registry,
+                    )
+                    .unwrap_or_default();
+                    let _ = responder.send(vars);
+                }
+                Ok(ExecutionCommand::GetUpvalues {
+                    frame_id,
+                    responder,
+                }) => {
+                    let vars = Evaluator::get_frame_upvalues(
                         lua,
                         frame_id,
                         base_level,

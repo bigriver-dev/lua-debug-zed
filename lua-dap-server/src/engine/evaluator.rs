@@ -61,6 +61,22 @@ impl Evaluator {
     }
 
     /*
+     * inspects upvalues (variables captured from an enclosing scope) for a target stack frame.
+     */
+    pub fn get_frame_upvalues(
+        lua: &Lua,
+        frame_level: usize,
+        base_level: usize,
+        registry: &mut TableRegistry,
+    ) -> Result<Vec<DapVariable>> {
+        let upvalues = Self::collect_frame_upvalues(lua, frame_level, base_level)?;
+        Ok(upvalues
+            .into_iter()
+            .map(|(name, value)| Self::format_dap_variable(name, &value, registry))
+            .collect())
+    }
+
+    /*
      * Lua global table (_G) as a flat list of variables.
      */
     pub fn get_globals(lua: &Lua, registry: &mut TableRegistry) -> Result<Vec<DapVariable>> {
@@ -118,6 +134,39 @@ impl Evaluator {
             &result,
             registry,
         ))
+    }
+
+    /*
+     * walks debug.getupvalue for a given frame
+     */
+    fn collect_frame_upvalues(
+        lua: &Lua,
+        frame_level: usize,
+        base_level: usize,
+    ) -> Result<Vec<(String, Value)>> {
+        let level = base_level + frame_level;
+        let Some(func) = lua.inspect_stack(level, |info| info.function()) else {
+            return Ok(Vec::new());
+        };
+
+        let debug_table: Table = lua.globals().get("debug")?;
+        let getupvalue: Function = debug_table.get("getupvalue")?;
+
+        let mut upvalues = Vec::new();
+        let mut i = 1;
+        while let Ok((maybe_name, value)) =
+            getupvalue.call::<(Option<String>, Value)>((func.clone(), i))
+        {
+            match maybe_name {
+                // _ENV is useless for upvalues
+                Some(name) if name != "_ENV" => upvalues.push((name, value)),
+                Some(_) => {}
+                None => break,
+            }
+            i += 1;
+        }
+
+        Ok(upvalues)
     }
 
     /*

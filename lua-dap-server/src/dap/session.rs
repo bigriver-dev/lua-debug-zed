@@ -38,6 +38,7 @@ pub struct DapSession<R, W> {
     seq: i64,
     breakpoints: Arc<Mutex<BreakpointRegistry>>,
     function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
+    exception_breakpoints_enabled: Arc<Mutex<bool>>,
     cmd_sender: Option<Sender<ExecutionCommand>>,
     event_receiver: Option<UnboundedReceiver<RunnerEvent>>,
     pending_launch: Option<PendingLaunch>,
@@ -55,6 +56,7 @@ where
             seq: 1,
             breakpoints: Arc::new(Mutex::new(BreakpointRegistry::new())),
             function_breakpoints: Arc::new(Mutex::new(FunctionBreakpointRegistry::new())),
+            exception_breakpoints_enabled: Arc::new(Mutex::new(true)),
             cmd_sender: None,
             event_receiver: None,
             pending_launch: None,
@@ -168,6 +170,13 @@ where
                     "supportsEvaluateForHovers": true,
                     "supportsConditionalBreakpoints": true,
                     "supportsExceptionInfoRequest": true,
+                    "exceptionBreakpointFilters": [
+                        {
+                            "filter": "uncaught",
+                            "label": "Uncaught Exceptions",
+                            "default": true
+                        }
+                    ],
                 });
                 self.send_response(Response::success(request_seq, &command, Some(capabilities)))
                     .await?;
@@ -242,20 +251,23 @@ where
                 if let Some(pending) = self.pending_launch.take() {
                     let bps = Arc::clone(&self.breakpoints);
                     let func_bps = Arc::clone(&self.function_breakpoints);
-                    std::thread::spawn(move || match LuaRunner::new(bps, func_bps) {
-                        Ok(runner) => {
-                            let _ = runner.execute_script(
-                                &pending.program_path,
-                                pending.dll_dir.as_deref(),
-                                &pending.preload_dirs,
-                                pending.cmd_rx,
-                                pending.event_tx,
-                            );
-                        }
-                        Err(err) => {
-                            let _ = pending.event_tx.send(RunnerEvent::Terminated {
-                                error: Some(err.to_string()),
-                            });
+                    let exception_enabled = Arc::clone(&self.exception_breakpoints_enabled);
+                    std::thread::spawn(move || {
+                        match LuaRunner::new(bps, func_bps, exception_enabled) {
+                            Ok(runner) => {
+                                let _ = runner.execute_script(
+                                    &pending.program_path,
+                                    pending.dll_dir.as_deref(),
+                                    &pending.preload_dirs,
+                                    pending.cmd_rx,
+                                    pending.event_tx,
+                                );
+                            }
+                            Err(err) => {
+                                let _ = pending.event_tx.send(RunnerEvent::Terminated {
+                                    error: Some(err.to_string()),
+                                });
+                            }
                         }
                     });
                 }
@@ -264,6 +276,18 @@ where
             }
 
             "setExceptionBreakpoints" => {
+                let args = req.arguments.unwrap_or_default();
+                let filters: Vec<String> = args
+                    .get("filters")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|f| f.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                *self.exception_breakpoints_enabled.lock() =
+                    filters.iter().any(|f| f == "uncaught");
                 self.send_response(Response::success(request_seq, &command, None))
                     .await?;
             }
@@ -376,6 +400,11 @@ where
                         expensive: false,
                     },
                     Scope {
+                        name: "Upvalues".to_string(),
+                        variables_reference: 1500 + frame_id,
+                        expensive: false,
+                    },
+                    Scope {
                         name: "Globals".to_string(),
                         variables_reference: 2000 + frame_id,
                         expensive: true,
@@ -406,6 +435,12 @@ where
                     } else if var_ref >= 2000 {
                         tx.send(ExecutionCommand::GetGlobals { responder: resp_tx })
                             .is_ok()
+                    } else if var_ref >= 1500 {
+                        tx.send(ExecutionCommand::GetUpvalues {
+                            frame_id: var_ref - 1500,
+                            responder: resp_tx,
+                        })
+                        .is_ok()
                     } else if var_ref >= 1000 {
                         tx.send(ExecutionCommand::GetVariables {
                             frame_id: var_ref - 1000,

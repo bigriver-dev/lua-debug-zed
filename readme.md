@@ -9,11 +9,14 @@ Features:
 - breakpoints
 - function breakpoints (this is implemented, but zed currently doesn't support this.)
 - conditional breakpoints
-- variable
+- exception breakpoints
+- upvalues
+- variables
 - step over, step in, step out
 - watches
 - evaluate expressions
 - exception
+
 
 # Debugger installation (current method)
 
