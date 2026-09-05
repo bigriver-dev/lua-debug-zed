@@ -415,10 +415,10 @@ impl Evaluator {
     }
 
     /*
-     * peeks inside table contents to show preview of up to 20 chars
+     * peeks inside table contents to show preview of up to 300 chars
      */
     fn preview_table(t: &Table, count: &mut usize) -> String {
-        const PREVIEW_CHARS: usize = 20;
+        const PREVIEW_CHARS: usize = 300;
         let mut preview = String::new();
         let mut truncated = false;
         for pair in t.pairs::<Value, Value>() {

@@ -29,6 +29,7 @@ struct PendingLaunch {
     program_path: PathBuf,
     dll_dir: Option<PathBuf>,
     preload_dirs: Vec<PathBuf>,
+    stop_on_entry: bool,
     cmd_rx: Receiver<ExecutionCommand>,
     event_tx: UnboundedSender<RunnerEvent>,
 }
@@ -197,6 +198,7 @@ where
                 self.pending_launch = Some(PendingLaunch {
                     program_path: PathBuf::from(args.program),
                     dll_dir: args.c_dll_dir.map(PathBuf::from),
+                    stop_on_entry: args.stop_on_entry,
                     preload_dirs: args.preload_paths.into_iter().map(PathBuf::from).collect(),
                     cmd_rx,
                     event_tx,
@@ -258,6 +260,7 @@ where
                             Ok(runner) => {
                                 let _ = runner.execute_script(
                                     &pending.program_path,
+                                    pending.stop_on_entry,
                                     pending.dll_dir.as_deref(),
                                     &pending.preload_dirs,
                                     pending.cmd_rx,

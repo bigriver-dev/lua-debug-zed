@@ -123,6 +123,7 @@ impl LuaRunner {
     pub fn execute_script(
         &self,
         script_path: &Path,
+        stop_on_entry: bool,
         c_dll_dir: Option<&Path>,
         preload_dirs: &[PathBuf],
         cmd_receiver: crossbeam_channel::Receiver<ExecutionCommand>,
@@ -148,6 +149,8 @@ impl LuaRunner {
             // Stepping state tracked across hook invocations
             let step_mode = Arc::new(Mutex::new(StepMode::None));
             let stack_depth = Arc::new(Mutex::new(0usize));
+            let pending_entry_stop = Arc::new(Mutex::new(stop_on_entry));
+            let entry_script_path = script_path.to_path_buf();
 
             // Clone what the xpcall error handler (below) needs before the
             // hook closure moves the originals.
@@ -160,6 +163,8 @@ impl LuaRunner {
             // Register safe Rust debug hook
             let bps = Arc::clone(&self.breakpoints);
             let func_bps = Arc::clone(&self.function_breakpoints);
+            let entry_stop = Arc::clone(&pending_entry_stop);
+            let entry_path = entry_script_path.clone();
             self.lua.set_hook(
                 HookTriggers {
                     every_line: true,
@@ -175,6 +180,8 @@ impl LuaRunner {
                         &func_bps,
                         &step_mode,
                         &stack_depth,
+                        &entry_stop,
+                        &entry_path,
                         &cmd_receiver,
                         &hook_event_sender,
                     )?;
@@ -311,6 +318,8 @@ impl LuaRunner {
         function_breakpoints: &Arc<Mutex<FunctionBreakpointRegistry>>,
         step_mode: &Arc<Mutex<StepMode>>,
         stack_depth: &Arc<Mutex<usize>>,
+        pending_entry_stop: &Arc<Mutex<bool>>,
+        entry_script_path: &Path,
         cmd_receiver: &Receiver<ExecutionCommand>,
         event_sender: &UnboundedSender<RunnerEvent>,
     ) -> Result<()> {
@@ -371,6 +380,29 @@ impl LuaRunner {
         };
         let clean_path_str = src_str.strip_prefix('@').unwrap_or(&src_str);
         let src_path = PathBuf::from(clean_path_str);
+
+        //if debug.json `stopOnEntry`, stop on first line of 'program' target file
+        let should_stop_on_entry = if src_path == entry_script_path {
+            let mut flag = pending_entry_stop.lock();
+            let fire = *flag;
+            *flag = false;
+            fire
+        } else {
+            false
+        };
+        if should_stop_on_entry {
+            Self::pause_and_wait(
+                _lua,
+                "entry",
+                None,
+                current_depth,
+                0,
+                step_mode,
+                cmd_receiver,
+                event_sender,
+            );
+            return Ok(());
+        }
 
         // evaluate breakpoint or step conditions
         let is_breakpoint_hit = {
