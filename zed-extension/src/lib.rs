@@ -126,16 +126,34 @@ impl zed::Extension for LuaDebugExtension {
 
         let request = self.dap_request_kind(adapter_name, parsed_config)?;
 
-        // debug code
-        // let (os, _arch) = zed::current_platform();
-        // let binary_name = match os {
-        //     zed::Os::Windows => "lua-dap-server.exe",
-        //     _ => "lua-dap-server",
-        // };
+        // debug.json tcp_connection` support; connect to a DAP instance elsewhere
+        if let Some(template) = config.tcp_connection.clone() {
+            let connection = zed::resolve_tcp_template(template)?;
+            return Ok(zed::DebugAdapterBinary {
+                command: None,
+                arguments: vec![],
+                cwd: Some(root_path),
+                envs: vec![],
+                connection: Some(connection),
+                request_args: zed::StartDebuggingRequestArguments {
+                    configuration: resolved_config,
+                    request,
+                },
+            });
+        }
 
-        // let command = user_provided_debug_adapter_path
-        //     .or_else(|| worktree.which("lua-dap-server"))
-        //     .unwrap_or_else(|| format!("{}/target/debug/{}", root_path, binary_name));
+        // An attach config that reaches here is missing its `tcp_connection`
+        if matches!(request, zed::StartDebuggingRequestArgumentsRequest::Attach) {
+            return Err(
+                "This config asks to attach, but has no `tcp_connection`, so Zed \
+                would launch the bundled lua-dap-server — which only supports `launch`. \
+                To attach to a DAP server running elsewhere (e.g. esi-dap inside \
+                Inmation), add: \"tcp_connection\": { \"host\": \"127.0.0.1\", \"port\": 4711 }. \
+                If you picked this from .vscode/launch.json, choose the .zed/debug.json \
+                entry instead — `debugServer` is a VS Code property and Zed ignores it."
+                    .to_string(),
+            );
+        }
 
         let command = if let Some(path) = debug_server_path {
             path
