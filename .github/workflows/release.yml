@@ -75,19 +75,25 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            CARGO_PATH="$(echo "$PATH" | tr ':' '\n' | grep -v -i '/usr/bin$' | tr '\n' ':')"
+          else
+            CARGO_PATH="$PATH"
+          fi
+
           for feature in lua51 lua52 lua53 lua54 lua55 luajit; do
             if [ "${{ runner.os }}" = "Windows" ] && [ "$feature" != "luajit" ]; then
               ver="${feature#lua}"
               mkdir -p "dll-build/$feature"
-              out=$(pwsh -File scripts/windows/build-lua-dll.ps1 -LuaVersion "$ver" -OutDir "dll-build/$feature")
+              out=$(PATH="$CARGO_PATH" pwsh -File scripts/windows/build-lua-dll.ps1 -LuaVersion "$ver" -OutDir "dll-build/$feature")
               echo "$out"
               lua_lib=$(echo "$out" | grep '^LUA_LIB=' | tail -1 | cut -d'=' -f2-)
               lua_lib_name=$(echo "$out" | grep '^LUA_LIB_NAME=' | tail -1 | cut -d'=' -f2-)
-              LUA_LIB="$lua_lib" LUA_LIB_NAME="$lua_lib_name" LUA_LINK=dylib \
+              PATH="$CARGO_PATH" LUA_LIB="$lua_lib" LUA_LIB_NAME="$lua_lib_name" LUA_LINK=dylib \
                 cargo build --release -p lua-dap-server --no-default-features --features "$feature"
               cp "$lua_lib/$lua_lib_name.dll" "dist/$lua_lib_name.dll"
             else
-              cargo build --release -p lua-dap-server --no-default-features --features "$feature"
+              PATH="$CARGO_PATH" cargo build --release -p lua-dap-server --no-default-features --features "$feature"
             fi
             cp "target/release/lua-dap-server${{ matrix.ext }}" "dist/lua-dap-server-${feature}${{ matrix.ext }}"
           done
