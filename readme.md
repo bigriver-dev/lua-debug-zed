@@ -76,6 +76,8 @@ Features:
 
 3.) open up zed `extensions`. Top-right, select `install dev extension`. Point it to the `./zed-extension` directory of this project
 
+> If on windows, run the .ps1 script to build the necessary `.dll` files to link against
+
 4.) build dap server `cargo build -p lua-dap-server --bin lua-dap-server`. Defaults to lua53, change `Cargo.toml` to build another version.
 
 5.) create `debug.json` file in the directory like as follows:
