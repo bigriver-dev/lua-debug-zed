@@ -146,6 +146,9 @@ impl LuaRunner {
                 package.set("cpath", new_cpath)?;
             }
 
+            // keep script output off the DAP stdout channel
+            Self::redirect_output(&self.lua, event_sender.clone())?;
+
             // Stepping state tracked across hook invocations
             let step_mode = Arc::new(Mutex::new(StepMode::None));
             let stack_depth = Arc::new(Mutex::new(0usize));
@@ -220,8 +223,10 @@ impl LuaRunner {
                         &error_event_sender,
                     );
                 } else {
-                    let _ = error_event_sender
-                        .send(RunnerEvent::Output(format!("Uncaught error: {}", message)));
+                    let _ = error_event_sender.send(RunnerEvent::Output(format!(
+                        "Uncaught error: {}\n",
+                        message
+                    )));
                 }
                 Ok(err)
             })?;
@@ -243,6 +248,44 @@ impl LuaRunner {
     }
 
     /*
+     * Covers print / io.write / io.flush. Code that writes via io.stdout:write still bypasses this.
+     */
+    fn redirect_output(lua: &Lua, event_sender: UnboundedSender<RunnerEvent>) -> Result<()> {
+        const REDIRECT: &str = r#"
+local sink = ...
+print = function(...)
+    local n = select('#', ...)
+    local parts = {}
+    for i = 1, n do
+        parts[i] = tostring((select(i, ...)))
+    end
+    sink(table.concat(parts, '\t') .. '\n')
+end
+if io then
+    io.write = function(...)
+        local n = select('#', ...)
+        for i = 1, n do
+            sink(tostring((select(i, ...))))
+        end
+    end
+    io.flush = function() end
+end
+"#;
+
+        let sink = lua.create_function(move |_, text: String| {
+            let _ = event_sender.send(RunnerEvent::Output(text));
+            Ok(())
+        })?;
+
+        let chunk = lua
+            .load(REDIRECT)
+            .set_name("=[dap output redirect]")
+            .into_function()?;
+        chunk.call::<()>(sink)?;
+        Ok(())
+    }
+
+    /*
      * Scans a folder (non-recursively) for .lua and .dll/.so files;
      * loads each into a global named after its filename
      */
@@ -251,7 +294,7 @@ impl LuaRunner {
             Ok(entries) => entries,
             Err(err) => {
                 let _ = event_sender.send(RunnerEvent::Output(format!(
-                    "Could not read preload folder {}: {}",
+                    "Could not read preload folder {}: {}\n",
                     dir.display(),
                     err
                 )));
@@ -292,14 +335,14 @@ impl LuaRunner {
                 Ok(value) => {
                     if let Err(err) = lua.globals().set(stem.clone(), value) {
                         let _ = event_sender.send(RunnerEvent::Output(format!(
-                            "Failed to bind preloaded module '{}': {}",
+                            "Failed to bind preloaded module '{}': {}\n",
                             stem, err
                         )));
                     }
                 }
                 Err(err) => {
                     let _ = event_sender.send(RunnerEvent::Output(format!(
-                        "Failed to preload {}: {}",
+                        "Failed to preload {}: {}\n",
                         path.display(),
                         err
                     )));
@@ -333,7 +376,11 @@ impl LuaRunner {
                 let current_depth = *depth;
                 drop(depth);
 
-                // Function breakpoints - check the name this call resolved to
+                // Function breakpoints - check the name this call resolved to.
+                // debug.names() allocates, so skip it entirely when none are set.
+                if function_breakpoints.lock().is_empty() {
+                    return Ok(());
+                }
                 if let Some(name) = debug.names().name {
                     let matched = function_breakpoints.lock().condition_for(&name);
                     if let Some(condition) = matched {
@@ -372,52 +419,53 @@ impl LuaRunner {
         let current_depth = *depth;
         drop(depth);
 
+        let stepping = *step_mode.lock() != StepMode::None;
+        let entry_pending = *pending_entry_stop.lock();
+        if !stepping && !entry_pending && breakpoints.lock().is_empty() {
+            return Ok(());
+        }
+
         // extract source path and line number.
         let line = debug.current_line().unwrap_or(0);
         let src_str = match debug.source().source {
             Some(s) => s,
             None => return Ok(()),
         };
-        let clean_path_str = src_str.strip_prefix('@').unwrap_or(&src_str);
-        let src_path = PathBuf::from(clean_path_str);
 
         //if debug.json `stopOnEntry`, stop on first line of 'program' target file
-        let should_stop_on_entry = if src_path == entry_script_path {
-            let mut flag = pending_entry_stop.lock();
-            let fire = *flag;
-            *flag = false;
-            fire
-        } else {
-            false
-        };
-        if should_stop_on_entry {
-            Self::pause_and_wait(
-                _lua,
-                "entry",
-                None,
-                current_depth,
-                0,
-                step_mode,
-                cmd_receiver,
-                event_sender,
-            );
-            return Ok(());
+        if entry_pending {
+            let clean_path_str = src_str.strip_prefix('@').unwrap_or(&src_str);
+            if Path::new(clean_path_str) == entry_script_path {
+                let mut flag = pending_entry_stop.lock();
+                let fire = *flag;
+                *flag = false;
+                drop(flag);
+                if fire {
+                    Self::pause_and_wait(
+                        _lua,
+                        "entry",
+                        None,
+                        current_depth,
+                        0,
+                        step_mode,
+                        cmd_receiver,
+                        event_sender,
+                    );
+                    return Ok(());
+                }
+            }
         }
 
         // evaluate breakpoint or step conditions
-        let is_breakpoint_hit = {
-            let registry = breakpoints.lock();
-            if !registry.is_breakpoint(&src_path, line) {
-                false
-            } else {
-                match registry.condition_for(&src_path, line) {
-                    Some(cond) => {
-                        drop(registry);
-                        Evaluator::evaluate_condition(_lua, 0, 0, &cond)
-                    }
-                    None => true,
-                }
-            }
+        // (registry lock is released before running any condition expression)
+        let condition = {
+            let mut registry = breakpoints.lock();
+            registry.lookup(&src_str, line)
+        };
+        let is_breakpoint_hit = match condition {
+            None => false,
+            Some(None) => true,
+            Some(Some(cond)) => Evaluator::evaluate_condition(_lua, 0, 0, &cond),
         };
 
         let current_step = *step_mode.lock();

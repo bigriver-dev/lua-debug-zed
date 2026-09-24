@@ -150,7 +150,7 @@ where
                 self.send_event(Event::terminated()).await?;
             }
             RunnerEvent::Output(message) => {
-                let body = json!({ "category": "stderr", "output": format!("{}\n", message) });
+                let body = json!({ "category": "stdout", "output": message });
                 self.send_event(Event::new("output", Some(body))).await?;
             }
         }

@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 pub struct BreakpointRegistry {
     // Maps normalized file paths to set of active line numbers
     file_breakpoints: HashMap<PathBuf, HashMap<usize, Option<String>>>,
+    // Memoized `@source` chunk name -> normalized path.
+    resolved: HashMap<String, PathBuf>,
+    // count of armed breakpoints
+    total: usize,
 }
 
 impl BreakpointRegistry {
@@ -23,7 +27,12 @@ impl BreakpointRegistry {
     pub fn set_breakpoints(&mut self, path: PathBuf, breakpoints: Vec<(usize, Option<String>)>) {
         let normalized = normalize_path(&path);
         let map: HashMap<usize, Option<String>> = breakpoints.into_iter().collect();
-        self.file_breakpoints.insert(normalized, map);
+        let added = map.len();
+        let removed = self
+            .file_breakpoints
+            .insert(normalized, map)
+            .map_or(0, |old| old.len());
+        self.total = (self.total + added) - removed;
     }
 
     /*
@@ -31,29 +40,37 @@ impl BreakpointRegistry {
      */
     pub fn clear_breakpoints(&mut self, path: &Path) {
         let normalized = normalize_path(path);
-        self.file_breakpoints.remove(&normalized);
+        if let Some(old) = self.file_breakpoints.remove(&normalized) {
+            self.total -= old.len();
+        }
     }
 
     /*
-     * lookup called inside the line-hook hot path
+     * True when nothing is armed
      */
-    pub fn is_breakpoint(&self, path: &Path, line: usize) -> bool {
-        let normalized = normalize_path(path);
-        self.file_breakpoints
-            .get(&normalized)
-            .is_some_and(|lines| lines.contains_key(&line))
+    pub fn is_empty(&self) -> bool {
+        self.total == 0
     }
 
     /*
-     * conditional breakpoint entry
+     * Hot path lookup, called once per executed Lua line.
      */
-    pub fn condition_for(&self, path: &Path, line: usize) -> Option<String> {
-        let normalized = normalize_path(path);
+    pub fn lookup(&mut self, raw_source: &str, line: usize) -> Option<Option<String>> {
+        if self.total == 0 {
+            return None;
+        }
+
+        if !self.resolved.contains_key(raw_source) {
+            let cleaned = raw_source.strip_prefix('@').unwrap_or(raw_source);
+            let normalized = normalize_path(Path::new(cleaned));
+            self.resolved.insert(raw_source.to_string(), normalized);
+        }
+        let path = &self.resolved[raw_source];
+
         self.file_breakpoints
-            .get(&normalized)
+            .get(path)
             .and_then(|lines| lines.get(&line))
             .cloned()
-            .flatten()
     }
 }
 
@@ -74,6 +91,10 @@ impl FunctionBreakpointRegistry {
         self.functions = breakpoints.into_iter().collect();
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty()
+    }
+
     pub fn condition_for(&self, name: &str) -> Option<Option<String>> {
         self.functions.get(name).cloned()
     }
@@ -86,12 +107,12 @@ fn normalize_path(path: &Path) -> PathBuf {
     // Fast path: attempt canonicalization if possible, fallback to clean path representation
     let path_buf = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
-    // Strip Windows verbatim prefix (`\\?\`) if present to ensure reliable matching across DAP clients
+    // Strip Windows verbatim prefix (`\?\`) if present to ensure reliable matching across DAP clients
     // thanks claude for this; I hate pattern matching/regex
     #[cfg(windows)]
     {
         let path_str = path_buf.to_string_lossy();
-        if path_str.starts_with(r"\\?\") {
+        if path_str.starts_with(r"\?\") {
             return PathBuf::from(&path_str[4..]);
         }
     }
