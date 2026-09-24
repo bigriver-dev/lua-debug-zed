@@ -71,6 +71,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # windows .dll building on linux CI is a nightmare
       - name: Build all Lua versions (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
