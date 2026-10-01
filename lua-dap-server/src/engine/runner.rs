@@ -1,4 +1,4 @@
-use crate::engine::breakpoints::{BreakpointRegistry, FunctionBreakpointRegistry};
+use crate::engine::breakpoints::{BreakpointRegistry, FunctionBreakpointRegistry, normalize_path};
 use crate::engine::evaluator::{DapVariable, Evaluator, TableRegistry};
 use crossbeam_channel::{Receiver, Sender};
 use mlua::debug::{Debug as LuaDebug, DebugEvent};
@@ -682,10 +682,17 @@ end
                 .name
                 .map(|s| s.into_owned())
                 .unwrap_or_else(|| "<anonymous>".to_string());
+            // strip the raw '@' file marker and resolve to an absolute path
             let source_path = info
                 .source()
                 .source
-                .map(|s| s.into_owned())
+                .map(|s| match s.strip_prefix('@') {
+                    Some(file_path) => normalize_path(Path::new(file_path))
+                        .to_string_lossy()
+                        .into_owned(),
+                    // not a C function or inline string chunk
+                    None => s.into_owned(),
+                })
                 .unwrap_or_default();
             let line = info.current_line().unwrap_or(0);
 

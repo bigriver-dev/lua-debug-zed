@@ -103,17 +103,17 @@ impl FunctionBreakpointRegistry {
 /*
  * normalizing paths garbanzo
  */
-fn normalize_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     // Fast path: attempt canonicalization if possible, fallback to clean path representation
     let path_buf = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
-    // Strip Windows verbatim prefix (`\?\`) if present to ensure reliable matching across DAP clients
+    // Strip Windows verbatim prefix (`\\?\`) if present to ensure reliable matching across DAP clients
     // thanks claude for this; I hate pattern matching/regex
     #[cfg(windows)]
     {
         let path_str = path_buf.to_string_lossy();
-        if path_str.starts_with(r"\?\") {
-            return PathBuf::from(&path_str[4..]);
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
         }
     }
 
