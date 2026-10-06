@@ -25,6 +25,22 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+// Wire-message trace for debugging; a no-op in release builds so shipped
+// binaries never write lua-dap-server-trace.log next to the user's project.
+fn trace(direction: &str, msg: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("lua-dap-server-trace.log")
+    {
+        let _ = writeln!(f, "{direction}: {msg}");
+    }
+}
+
 struct PendingLaunch {
     program_path: PathBuf,
     dll_dir: Option<PathBuf>,
@@ -84,15 +100,7 @@ where
                 },
             };
 
-            //log for debugging this piece of sugar honey iced tea
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("lua-dap-server-trace.log")
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "IN: {}", raw_msg);
-            }
+            trace("IN", &raw_msg);
 
             let message: ProtocolMessage = match serde_json::from_str(&raw_msg) {
                 Ok(msg) => msg,
@@ -660,14 +668,7 @@ where
         response.seq = self.seq;
         self.seq += 1;
         let msg = serde_json::to_string(&response)?;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("lua-dap-server-trace.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "OUT: {}", msg);
-        }
+        trace("OUT", &msg);
         self.transport.write_msg(&msg).await?;
         Ok(())
     }
@@ -676,14 +677,7 @@ where
         event.seq = self.seq;
         self.seq += 1;
         let msg = serde_json::to_string(&event)?;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("lua-dap-server-trace.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "OUT: {}", msg);
-        }
+        trace("OUT", &msg);
         self.transport.write_msg(&msg).await?;
         Ok(())
     }
