@@ -385,6 +385,35 @@ impl Evaluator {
     }
 
     /*
+     * Log every `{expr}` in the stopped frame via Lua's own tostring.
+     * Will show error expressions
+     */
+    pub fn format_log_message(lua: &Lua, template: &str) -> String {
+        let mut out = String::new();
+        let mut rest = template;
+        while let Some(start) = rest.find('{') {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 1..];
+            match after.find('}') {
+                Some(end) => {
+                    match Self::eval_in_frame(lua, 0, 0, after[..end].trim()) {
+                        Ok(value) => out.push_str(&Self::format_lua_error_value(lua, &value)),
+                        Err(err) => out.push_str(&format!("<error: {err}>")),
+                    }
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    // unmatched brace: keep it literally
+                    out.push('{');
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /*
      * Finds the inspect_stack level of the Lua frame that actually raised an error
      */
     pub fn find_error_frame_level(lua: &Lua) -> usize {

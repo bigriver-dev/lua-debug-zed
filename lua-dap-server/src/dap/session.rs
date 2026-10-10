@@ -13,8 +13,10 @@
 
 use crate::dap::protocol::*;
 use crate::dap::transport::DapTransport;
-use crate::engine::breakpoints::{BreakpointRegistry, FunctionBreakpointRegistry};
-use crate::engine::runner::{ExecutionCommand, LuaRunner, RunnerEvent};
+use crate::engine::breakpoints::{
+    BreakpointRegistry, FunctionBreakpointRegistry, HitCondition, SourceBp,
+};
+use crate::engine::runner::{ExecutionCommand, LuaRunner, RunControl, RunnerEvent, ScriptEnv};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -22,6 +24,8 @@ use parking_lot::Mutex;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -45,6 +49,7 @@ struct PendingLaunch {
     program_path: PathBuf,
     dll_dir: Option<PathBuf>,
     preload_dirs: Vec<PathBuf>,
+    env: ScriptEnv,
     stop_on_entry: bool,
     cmd_rx: Receiver<ExecutionCommand>,
     event_tx: UnboundedSender<RunnerEvent>,
@@ -60,6 +65,8 @@ pub struct DapSession<R, W> {
     event_receiver: Option<UnboundedReceiver<RunnerEvent>>,
     pending_launch: Option<PendingLaunch>,
     last_exception: Option<String>,
+    control: Arc<RunControl>,
+    paused: bool,
 }
 
 impl<R, W> DapSession<R, W>
@@ -78,6 +85,8 @@ where
             event_receiver: None,
             pending_launch: None,
             last_exception: None,
+            control: Arc::new(RunControl::default()),
+            paused: false,
         }
     }
 
@@ -140,6 +149,8 @@ where
     async fn handle_runner_event(&mut self, event: RunnerEvent) -> Result<()> {
         match event {
             RunnerEvent::Stopped { reason, message } => {
+                self.paused = true;
+                self.control.pause_requested.store(false, Ordering::Relaxed);
                 self.last_exception = message.clone();
                 if reason == "exception" {
                     if let Some(ref text) = message {
@@ -180,6 +191,9 @@ where
                     "supportsConditionalBreakpoints": true,
                     "supportsExceptionInfoRequest": true,
                     "supportsSetVariable": true,
+                    "supportsLogPoints": true,
+                    "supportsHitConditionalBreakpoints": true,
+                    "supportsTerminateRequest": true,
                     "exceptionBreakpointFilters": [
                         {
                             "filter": "uncaught",
@@ -208,6 +222,18 @@ where
                     dll_dir: args.c_dll_dir.map(PathBuf::from),
                     stop_on_entry: args.stop_on_entry,
                     preload_dirs: args.preload_paths.into_iter().map(PathBuf::from).collect(),
+                    env: ScriptEnv {
+                        cwd: args.cwd.map(PathBuf::from),
+                        args: args.args,
+                        package_path: args
+                            .package_path
+                            .map(PathList::into_vec)
+                            .unwrap_or_default(),
+                        package_cpath: args
+                            .package_cpath
+                            .map(PathList::into_vec)
+                            .unwrap_or_default(),
+                    },
                     cmd_rx,
                     event_tx,
                 });
@@ -225,11 +251,29 @@ where
                 if let Some(path_str) = args.source.path {
                     let path = PathBuf::from(&path_str);
 
-                    // dump all breakpoints
-                    let entries: Vec<(usize, Option<String>)> = args
+                    // dump all breakpoints. Clients can send "" for an unused field.
+                    let non_blank = |s: &Option<String>| {
+                        s.as_deref()
+                            .filter(|t| !t.trim().is_empty())
+                            .map(String::from)
+                    };
+                    // a breakpoint whose hit condition doesn't parse is left unarmed (reported
+                    // unverified below) rather than silently stopping on every hit
+                    let entries: Vec<SourceBp> = args
                         .breakpoints
                         .iter()
-                        .map(|bp| (bp.line, bp.condition.clone()))
+                        .filter_map(|bp| {
+                            let hit_condition = match non_blank(&bp.hit_condition) {
+                                Some(text) => Some(HitCondition::parse(&text)?),
+                                None => None,
+                            };
+                            Some(SourceBp {
+                                line: bp.line,
+                                condition: non_blank(&bp.condition),
+                                hit_condition,
+                                log_message: non_blank(&bp.log_message),
+                            })
+                        })
                         .collect();
 
                     // set_breakpoints based on line numbers
@@ -240,10 +284,14 @@ where
 
                     // DAP response verification payloads
                     for bp in args.breakpoints {
+                        let bad_hit_condition = non_blank(&bp.hit_condition)
+                            .filter(|t| HitCondition::parse(t).is_none());
                         verified_breakpoints.push(Breakpoint {
                             id: Some(bp.line),
-                            verified: true,
-                            message: None,
+                            verified: bad_hit_condition.is_none(),
+                            message: bad_hit_condition.map(|t| {
+                                format!("Invalid hit condition '{t}' (expected e.g. 5, >= 5, % 3)")
+                            }),
                             source: Some(Source {
                                 name: args.source.name.clone(),
                                 path: Some(path_str.clone()),
@@ -263,14 +311,16 @@ where
                     let bps = Arc::clone(&self.breakpoints);
                     let func_bps = Arc::clone(&self.function_breakpoints);
                     let exception_enabled = Arc::clone(&self.exception_breakpoints_enabled);
+                    let control = Arc::clone(&self.control);
                     std::thread::spawn(move || {
-                        match LuaRunner::new(bps, func_bps, exception_enabled) {
+                        match LuaRunner::new(bps, func_bps, exception_enabled, control) {
                             Ok(runner) => {
                                 let _ = runner.execute_script(
                                     &pending.program_path,
                                     pending.stop_on_entry,
                                     pending.dll_dir.as_deref(),
                                     &pending.preload_dirs,
+                                    pending.env,
                                     pending.cmd_rx,
                                     pending.event_tx,
                                 );
@@ -611,7 +661,42 @@ where
                 }
             }
 
+            "pause" => {
+                if !self.paused && self.cmd_sender.is_some() {
+                    self.control.pause_requested.store(true, Ordering::Relaxed);
+                }
+                self.send_response(Response::success(request_seq, &command, None))
+                    .await?;
+            }
+
+            "terminate" => {
+                if self.pending_launch.take().is_some() || self.cmd_sender.is_none() {
+                    self.send_event(Event::terminated()).await?;
+                } else if !self.control.finished.load(Ordering::Relaxed) {
+                    self.control
+                        .terminate_requested
+                        .store(true, Ordering::Relaxed);
+                    // wake a script that's parked
+                    if self.paused {
+                        self.paused = false;
+                        if let Some(ref tx) = self.cmd_sender {
+                            let _ = tx.send(ExecutionCommand::Continue);
+                        }
+                    }
+                    let control = Arc::clone(&self.control);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        if !control.finished.load(Ordering::Relaxed) {
+                            std::process::exit(0);
+                        }
+                    });
+                }
+                self.send_response(Response::success(request_seq, &command, None))
+                    .await?;
+            }
+
             "continue" => {
+                self.paused = false;
                 if let Some(ref tx) = self.cmd_sender {
                     let _ = tx.send(ExecutionCommand::Continue);
                 }
@@ -621,6 +706,7 @@ where
             }
 
             "next" => {
+                self.paused = false;
                 if let Some(ref tx) = self.cmd_sender {
                     let _ = tx.send(ExecutionCommand::StepOver);
                 }
@@ -629,6 +715,7 @@ where
             }
 
             "stepIn" => {
+                self.paused = false;
                 if let Some(ref tx) = self.cmd_sender {
                     let _ = tx.send(ExecutionCommand::StepIn);
                 }
@@ -637,6 +724,7 @@ where
             }
 
             "stepOut" => {
+                self.paused = false;
                 if let Some(ref tx) = self.cmd_sender {
                     let _ = tx.send(ExecutionCommand::StepOut);
                 }

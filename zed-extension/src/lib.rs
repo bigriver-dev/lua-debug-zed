@@ -95,6 +95,25 @@ fn substitute_workspace_folder(value: &mut json::Value, root_path: &str) {
     }
 }
 
+fn path_list(value: Option<&json::Value>) -> Vec<String> {
+    match value {
+        Some(json::Value::String(s)) => vec![s.clone()],
+        Some(json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+fn merge_search_paths(config: &mut json::Value, key: &str, global: Option<&json::Value>) {
+    let mut merged = path_list(config.get(key));
+    merged.extend(path_list(global));
+    if !merged.is_empty() {
+        config[key] = json::Value::from(merged);
+    }
+}
+
 impl zed::Extension for LuaDebugExtension {
     fn new() -> Self {
         Self
@@ -110,6 +129,15 @@ impl zed::Extension for LuaDebugExtension {
         let root_path = worktree.root_path();
         let mut parsed_config: json::Value =
             json::from_str(&config.config).map_err(|e| e.to_string())?;
+
+        let global_settings = zed::settings::LspSettings::for_worktree("lua-debugger", worktree)
+            .ok()
+            .and_then(|s| s.settings);
+        for key in ["packagePath", "packageCpath"] {
+            let global = global_settings.as_ref().and_then(|s| s.get(key));
+            merge_search_paths(&mut parsed_config, key, global);
+        }
+
         substitute_workspace_folder(&mut parsed_config, &root_path);
         let resolved_config = parsed_config.to_string();
 

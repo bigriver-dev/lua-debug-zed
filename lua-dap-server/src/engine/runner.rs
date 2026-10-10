@@ -6,6 +6,7 @@ use mlua::{HookTriggers, Lua, Result, Table, Value, VmState};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub enum ExecutionCommand {
@@ -89,11 +90,33 @@ pub enum StepMode {
     StepOut { target_depth: usize },
 }
 
+/// environment for the debuggee from debug.json
+#[derive(Debug, Default, Clone)]
+pub struct ScriptEnv {
+    pub cwd: Option<PathBuf>,
+    pub args: Vec<String>,
+    pub package_path: Vec<String>,
+    pub package_cpath: Vec<String>,
+}
+
+/// Requests the DAP session with a script that is running
+/// The debug hook polls these on every event
+#[derive(Debug, Default)]
+pub struct RunControl {
+    /// DAP `pause`: stop at the next line.
+    pub pause_requested: AtomicBool,
+    /// DAP `terminate`/`disconnect`: abort the script by raising an error from the hook.
+    pub terminate_requested: AtomicBool,
+    /// Set once the script thread is done, so a stuck-termination watchdog can stand down.
+    pub finished: AtomicBool,
+}
+
 pub struct LuaRunner {
     lua: Lua,
     breakpoints: Arc<Mutex<BreakpointRegistry>>,
     function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
     exception_breakpoints_enabled: Arc<Mutex<bool>>,
+    control: Arc<RunControl>,
 }
 
 impl LuaRunner {
@@ -104,6 +127,7 @@ impl LuaRunner {
         breakpoints: Arc<Mutex<BreakpointRegistry>>,
         function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
         exception_breakpoints_enabled: Arc<Mutex<bool>>,
+        control: Arc<RunControl>,
     ) -> Result<Self> {
         // let lua = Lua::new();
         // required! The created Lua state will not have safety guarantees and will allow to load C modules.
@@ -114,6 +138,7 @@ impl LuaRunner {
             breakpoints,
             function_breakpoints,
             exception_breakpoints_enabled,
+            control,
         })
     }
 
@@ -126,11 +151,19 @@ impl LuaRunner {
         stop_on_entry: bool,
         c_dll_dir: Option<&Path>,
         preload_dirs: &[PathBuf],
+        env: ScriptEnv,
         cmd_receiver: crossbeam_channel::Receiver<ExecutionCommand>,
         event_sender: UnboundedSender<RunnerEvent>,
     ) -> Result<()> {
         let hook_event_sender = event_sender.clone();
         let result = (|| -> Result<()> {
+            // Before anything resolves a relative path (require(), io.open, preload dirs).
+            if let Some(cwd) = &env.cwd {
+                std::env::set_current_dir(cwd).map_err(|e| {
+                    mlua::Error::RuntimeError(format!("cannot use cwd '{}': {e}", cwd.display()))
+                })?;
+            }
+
             // configure package.cpath so Lua can load compiled C/C++ dll/so extensions
             if let Some(dll_dir) = c_dll_dir {
                 let globals = self.lua.globals();
@@ -145,6 +178,17 @@ impl LuaRunner {
                 );
                 package.set("cpath", new_cpath)?;
             }
+
+            // user-configured search paths
+            Self::prepend_search_path(&self.lua, "path", &env.package_path)?;
+            Self::prepend_search_path(&self.lua, "cpath", &env.package_cpath)?;
+
+            let arg_table = self.lua.create_table()?;
+            arg_table.set(0, script_path.to_string_lossy().into_owned())?;
+            for (i, a) in env.args.iter().enumerate() {
+                arg_table.set(i + 1, a.as_str())?;
+            }
+            self.lua.globals().set("arg", arg_table)?;
 
             // keep script output off the DAP stdout channel
             Self::redirect_output(&self.lua, event_sender.clone())?;
@@ -162,12 +206,14 @@ impl LuaRunner {
             let error_stack_depth = Arc::clone(&stack_depth);
             let error_event_sender = event_sender.clone();
             let error_exception_enabled = Arc::clone(&self.exception_breakpoints_enabled);
+            let error_control = Arc::clone(&self.control);
 
             // Register safe Rust debug hook
             let bps = Arc::clone(&self.breakpoints);
             let func_bps = Arc::clone(&self.function_breakpoints);
             let entry_stop = Arc::clone(&pending_entry_stop);
             let entry_path = entry_script_path.clone();
+            let hook_control = Arc::clone(&self.control);
             self.lua.set_hook(
                 HookTriggers {
                     every_line: true,
@@ -185,6 +231,7 @@ impl LuaRunner {
                         &stack_depth,
                         &entry_stop,
                         &entry_path,
+                        &hook_control,
                         &cmd_receiver,
                         &hook_event_sender,
                     )?;
@@ -208,6 +255,9 @@ impl LuaRunner {
                 .into_function()?;
 
             let error_handler = self.lua.create_function(move |lua, err: Value| {
+                if error_control.terminate_requested.load(Ordering::Relaxed) {
+                    return Ok(err);
+                }
                 let message = Evaluator::format_lua_error_value(lua, &err);
                 if *error_exception_enabled.lock() {
                     let base_level = Evaluator::find_error_frame_level(lua);
@@ -232,19 +282,37 @@ impl LuaRunner {
             })?;
 
             let xpcall_fn: mlua::Function = self.lua.globals().get("xpcall")?;
-            // Discard (ok, err) deliberately: a caught failure was already found
-            let _: (bool, Value) = xpcall_fn.call((chunk_fn, error_handler))?;
+            let script_args = mlua::Variadic::from_iter(env.args.iter().cloned());
+            let _: (bool, Value) = xpcall_fn.call((chunk_fn, error_handler, script_args))?;
 
             Ok(())
         })();
 
+        self.control.finished.store(true, Ordering::Relaxed);
+
         // prevent hangs or other weird stuff by terminate signal
-        let error_message = result.as_ref().err().map(|e| e.to_string());
+        let error_message = if self.control.terminate_requested.load(Ordering::Relaxed) {
+            None // we asked it to stop; not a script failure
+        } else {
+            result.as_ref().err().map(|e| e.to_string())
+        };
         let _ = event_sender.send(RunnerEvent::Terminated {
             error: error_message,
         });
 
         result
+    }
+
+    /*
+     * Prepends entries to package.path / package.cpath
+     */
+    fn prepend_search_path(lua: &Lua, field: &str, entries: &[String]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let package: Table = lua.globals().get("package")?;
+        let current: String = package.get(field)?;
+        package.set(field, format!("{};{}", entries.join(";"), current))
     }
 
     /*
@@ -363,9 +431,16 @@ end
         stack_depth: &Arc<Mutex<usize>>,
         pending_entry_stop: &Arc<Mutex<bool>>,
         entry_script_path: &Path,
+        control: &Arc<RunControl>,
         cmd_receiver: &Receiver<ExecutionCommand>,
         event_sender: &UnboundedSender<RunnerEvent>,
     ) -> Result<()> {
+        if control.terminate_requested.load(Ordering::Relaxed) {
+            return Err(mlua::Error::RuntimeError(
+                "debug session terminated".to_string(),
+            ));
+        }
+
         let event = debug.event();
 
         // internal call stack depth counter
@@ -419,6 +494,24 @@ end
         let current_depth = *depth;
         drop(depth);
 
+        // DAP `pause` on a running script: stop at the next line we see
+        if control.pause_requested.load(Ordering::Relaxed)
+            && control.pause_requested.swap(false, Ordering::Relaxed)
+        {
+            *step_mode.lock() = StepMode::None;
+            Self::pause_and_wait(
+                _lua,
+                "pause",
+                None,
+                current_depth,
+                0,
+                step_mode,
+                cmd_receiver,
+                event_sender,
+            );
+            return Ok(());
+        }
+
         let stepping = *step_mode.lock() != StepMode::None;
         let entry_pending = *pending_entry_stop.lock();
         if !stepping && !entry_pending && breakpoints.lock().is_empty() {
@@ -458,15 +551,36 @@ end
 
         // evaluate breakpoint or step conditions
         // (registry lock is released before running any condition expression)
-        let condition = {
+        let spec = {
             let mut registry = breakpoints.lock();
             registry.lookup(&src_str, line)
         };
-        let is_breakpoint_hit = match condition {
-            None => false,
-            Some(None) => true,
-            Some(Some(cond)) => Evaluator::evaluate_condition(_lua, 0, 0, &cond),
-        };
+        let mut is_breakpoint_hit = false;
+        if let Some(spec) = spec {
+            // order matters: the hit count only advances when the condition holds
+            let condition_ok = match &spec.condition {
+                Some(cond) => Evaluator::evaluate_condition(_lua, 0, 0, cond),
+                None => true,
+            };
+            let hit_ok = condition_ok
+                && match spec.hit_condition {
+                    Some(hit) => {
+                        let hits = breakpoints.lock().record_hit(&src_str, line);
+                        hit.matches(hits)
+                    }
+                    None => true,
+                };
+            if hit_ok {
+                match &spec.log_message {
+                    // logpoint: print and keep running instead of stopping
+                    Some(template) => {
+                        let text = Evaluator::format_log_message(_lua, template);
+                        let _ = event_sender.send(RunnerEvent::Output(format!("{text}\n")));
+                    }
+                    None => is_breakpoint_hit = true,
+                }
+            }
+        }
 
         let current_step = *step_mode.lock();
         let should_step_pause = match current_step {

@@ -20,12 +20,26 @@
     },
     "cwd": {
       "type": "string",
-      "description": "Working directory"
+      "description": "Working directory for the script. Relative require()/io paths resolve against it. Defaults to the workspace folder."
     },
     "args": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Command line arguments"
+      "description": "Script arguments: available as the global `arg` table (arg[1..]; arg[0] is the script path), and as `...` on Lua 5.2+."
+    },
+    "packagePath": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ],
+      "description": "Entries prepended to Lua's package.path for this launch, e.g. [\"${workspaceFolder}/src/?.lua\"]. Searched before any global packagePath (settings.json: lsp.lua-debugger.settings.packagePath) and before Lua's defaults."
+    },
+    "packageCpath": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ],
+      "description": "Entries prepended to Lua's package.cpath for this launch (for .dll/.so modules loaded with require). Same precedence rules as packagePath."
     },
     "luaVersion": {
       "type": "string",

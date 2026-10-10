@@ -146,6 +146,10 @@ pub struct SourceBreakpoint {
     pub column: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +226,23 @@ pub struct EvaluateArguments {
     pub context: Option<String>,
 }
 
+/// search path setting: either `;` or an array of templates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PathList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl PathList {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            PathList::One(s) => vec![s],
+            PathList::Many(v) => v,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRequestArguments {
@@ -232,4 +253,12 @@ pub struct LaunchRequestArguments {
     pub stop_on_entry: bool,
     #[serde(default)]
     pub preload_paths: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub package_path: Option<PathList>,
+    #[serde(default)]
+    pub package_cpath: Option<PathList>,
 }
