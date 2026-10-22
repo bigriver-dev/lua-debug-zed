@@ -49,7 +49,7 @@
     },
     "modulePath": {
       "type": "string",
-      "description": "launch with runtimeExecutable: luadebug.dll/.so, or the folder holding it; it's put on the program's LUA_CPATH. Defaults to the dap.lua.binary folder, else the folder lua-dap-server is in."
+      "description": "launch with runtimeExecutable: the luadebug module (luadebug-<version>.dll/.so, or luadebug.dll/.so), or the folder holding it; it's put on the program's LUA_CPATH. Defaults to the dap.lua.binary folder, else the folder lua-dap-server is in. In a folder, the build matching luaVersion is used."
     },
     "host": {
       "type": "string",

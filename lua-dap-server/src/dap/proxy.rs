@@ -131,7 +131,8 @@ async fn connect(child: &mut Child, port: u16, attach_args: &Value) -> Result<Ga
         "seq": 1, "type": "request", "command": "initialize",
         "arguments": { "adapterID": "lua", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path" },
     });
-    let attach = json!({ "seq": 2, "type": "request", "command": "attach", "arguments": attach_args });
+    let attach =
+        json!({ "seq": 2, "type": "request", "command": "attach", "arguments": attach_args });
     game.write_msg(&initialize.to_string()).await?;
     game.write_msg(&attach.to_string()).await?;
 
@@ -343,47 +344,73 @@ fn free_port() -> Result<u16> {
  * LUA_CPATH for the host
  */
 fn module_cpath(args: &LaunchRequestArguments, console: &mut Console) -> Result<Option<String>> {
-    let module_file = format!("luadebug.{MODULE_EXT}");
+    let versioned = format!("luadebug-{}.{MODULE_EXT}", lua_feature());
+    let plain = format!("luadebug.{MODULE_EXT}");
+    let find = |dir: &Path| {
+        [&versioned, &plain]
+            .into_iter()
+            .find(|name| dir.join(name).is_file())
+            .cloned()
+    };
+
     let configured = args.module_path.as_deref().filter(|p| !p.trim().is_empty());
-    let dir = match configured {
+    let (dir, file) = match configured {
         Some(p) => {
             let path = PathBuf::from(p);
             if path.is_dir() {
-                path
+                match find(&path) {
+                    Some(file) => (path, file),
+                    None => bail!("modulePath '{p}' has no {versioned} or {plain}"),
+                }
             } else if path.is_file() {
-                if path.file_name().and_then(|n| n.to_str()) != Some(module_file.as_str()) {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                let suffix = format!(".{MODULE_EXT}");
+                let named_right =
+                    name == plain || (name.starts_with("luadebug-") && name.ends_with(&suffix));
+                if !named_right {
                     bail!(
-                        "modulePath '{p}' must be named {module_file}: require(\"luadebug\") looks for that file name"
+                        "modulePath '{p}' must be named {plain} or luadebug-<version>{suffix}: \
+                         require(\"luadebug\") looks for those names"
                     );
                 }
-                path.parent().map(Path::to_path_buf).unwrap_or_default()
+                let file = name.to_string();
+                (
+                    path.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    file,
+                )
             } else {
                 bail!("modulePath '{p}' doesn't exist");
             }
         }
-        None => std::env::current_exe()?
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default(),
+        None => {
+            let dir = std::env::current_exe()?
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            match find(&dir) {
+                Some(file) => (dir, file),
+                None => {
+                    console.push((
+                        "console",
+                        format!(
+                            "lua-dap-server: no {versioned} or {plain} in {}; the program has to \
+                             find it on its own package.cpath. Set \"modulePath\" to the folder \
+                             holding it.\n",
+                            dir.display()
+                        ),
+                    ));
+                    return Ok(None);
+                }
+            }
+        }
     };
 
-    if !dir.join(&module_file).is_file() {
-        if configured.is_some() {
-            bail!("modulePath '{}' has no {module_file}", dir.display());
-        }
-        console.push((
-            "console",
-            format!(
-                "lua-dap-server: no {module_file} in {}; the program has to find it on its own \
-                 package.cpath. Set \"modulePath\" to the folder holding it.\n",
-                dir.display()
-            ),
-        ));
-        return Ok(None);
-    }
-
+    // luadebug-lua54.dll -> ?-lua54.dll
     let entry = dir
-        .join(format!("?.{MODULE_EXT}"))
+        .join(file.replacen("luadebug", "?", 1))
         .to_string_lossy()
         .into_owned();
     // keep a LUA_CPATH the user set (in `env` or inherited); `;;` keeps Lua's defaults
@@ -395,6 +422,23 @@ fn module_cpath(args: &LaunchRequestArguments, console: &mut Console) -> Result<
         Some(rest) => format!("{entry};{rest}"),
         None => format!("{entry};;"),
     }))
+}
+
+// the Lua this server was built for: luaVersion picks the server, the server the module
+fn lua_feature() -> &'static str {
+    if cfg!(feature = "luajit") {
+        "luajit"
+    } else if cfg!(feature = "lua51") {
+        "lua51"
+    } else if cfg!(feature = "lua52") {
+        "lua52"
+    } else if cfg!(feature = "lua54") {
+        "lua54"
+    } else if cfg!(feature = "lua55") {
+        "lua55"
+    } else {
+        "lua53"
+    }
 }
 
 /*
