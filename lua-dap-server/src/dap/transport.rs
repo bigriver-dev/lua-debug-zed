@@ -3,11 +3,12 @@
  * DAP requires standard headers (Content-Length: <bytes>\r\n\r\n) before raw JSON payloads.
  */
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub struct DapTransport<R, W> {
-    reader: BufReader<R>,
+    reader: R,
     writer: W,
+    pending: Vec<u8>,
 }
 
 impl<R, W> DapTransport<R, W>
@@ -17,53 +18,59 @@ where
 {
     pub fn new(reader: R, writer: W) -> Self {
         Self {
-            reader: BufReader::new(reader),
+            reader,
             writer,
+            pending: Vec::new(),
         }
     }
 
     /*
-     * Reads headers byte-by-byte until \r\n\r\n, parses Content-Length, and reads the exact payload string.
+     * Returns the next complete message's JSON payload, or None at EOF.
      */
     pub async fn read_msg(&mut self) -> Result<Option<String>> {
-        let mut content_length: Option<usize> = None;
-
-        // Read headers until an empty line ("\r\n" or "\n") is encountered
+        let mut chunk = [0u8; 8192];
         loop {
-            let mut line = String::new();
-            let bytes_read = self.reader.read_line(&mut line).await?;
+            if let Some(msg) = self.take_msg()? {
+                return Ok(Some(msg));
+            }
+            let bytes_read = self.reader.read(&mut chunk).await?;
             if bytes_read == 0 {
                 return Ok(None); // EOF
             }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                break; // End of HTTP-style header block
-            }
-
-            if let Some((key, value)) = trimmed.split_once(':') {
-                if key.eq_ignore_ascii_case("Content-Length") {
-                    content_length = Some(
-                        value
-                            .trim()
-                            .parse::<usize>()
-                            .context("Invalid Content-Length value")?,
-                    );
-                }
-            }
+            self.pending.extend_from_slice(&chunk[..bytes_read]);
         }
+    }
 
-        let length = match content_length {
-            Some(len) => len,
-            None => return Ok(None),
+    /*
+     * Parses Content-Length out of the header block and splits one payload off the
+     * front of `pending`, if a whole one has arrived.
+     */
+    fn take_msg(&mut self) -> Result<Option<String>> {
+        let Some(header_end) = self.pending.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return Ok(None);
         };
+        let header = std::str::from_utf8(&self.pending[..header_end])?;
+        let length = header
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.trim()
+                    .eq_ignore_ascii_case("Content-Length")
+                    .then(|| value.trim().parse::<usize>())
+            })
+            .context("DAP message without a Content-Length header")?
+            .context("Invalid Content-Length value")?;
 
-        // Read the exact JSON payload based on Content-Length
-        let mut payload_buf = vec![0u8; length];
-        self.reader.read_exact(&mut payload_buf).await?;
-
-        let json_str = String::from_utf8(payload_buf)?;
-        Ok(Some(json_str))
+        let body_start = header_end + 4;
+        if self.pending.len() < body_start + length {
+            return Ok(None);
+        }
+        let payload: Vec<u8> = self
+            .pending
+            .drain(..body_start + length)
+            .skip(body_start)
+            .collect();
+        Ok(Some(String::from_utf8(payload)?))
     }
 
     /*

@@ -109,6 +109,8 @@ pub struct RunControl {
     pub terminate_requested: AtomicBool,
     /// Set once the script thread is done, so a stuck-termination watchdog can stand down.
     pub finished: AtomicBool,
+    /// Attached hosts only: a client is connected and configured
+    pub client_attached: AtomicBool,
 }
 
 pub struct LuaRunner {
@@ -623,7 +625,7 @@ end
      * blocks the calling thread until client sends
      * (Continue/StepOver/StepIn/StepOut)
      */
-    fn pause_and_wait(
+    pub(crate) fn pause_and_wait(
         lua: &Lua,
         reason: &'static str,
         message: Option<String>,

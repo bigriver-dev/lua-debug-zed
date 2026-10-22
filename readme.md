@@ -51,9 +51,23 @@ Features:
       "program": "${workspaceFolder}/main.lua",
       "stopOnEntry": false,
       "preloadPaths": ["${workspaceFolder}/lib"],
-      "luaVersion": "5.3"
+      "luaVersion": "5.3",
+      //"debugServerPath": "${workspaceFolder}/target/debug/lua-dap-server.exe",
+      "packageCpath": ["../luarocks/lib/lua/5.3/?.dll"],
+      "packagePath": ["../luarocks/share/lua/5.3/?.lua"]
     }
 ]
+```
+
+or put your `path` and `cpath` at the debugger level:
+```json
+{
+  "lsp": {
+    "lua": {
+      "binary": "C:\\Users\\User\\Documents\\GitHub\\lua-debug-zed\\dap-binary",
+    }
+  }
+}
 ```
 
 

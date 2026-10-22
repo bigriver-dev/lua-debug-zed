@@ -20,5 +20,6 @@ async fn main() -> Result<()> {
         eprintln!("DAP Session error: {:?}", err);
     }
 
-    Ok(())
+    // tokio's stdin reader is a blocking thread that can't be cancelled
+    std::process::exit(0)
 }

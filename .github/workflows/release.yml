@@ -100,6 +100,18 @@ jobs:
             Copy-Item "target/release/lua-dap-server.exe" "dist/lua-dap-server-$feature.exe"
           }
 
+      - name: Build luadebug module (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($feature in @("luajit", "lua51", "lua52", "lua53", "lua54", "lua55")) {
+            cargo build --release --manifest-path lua-debug-module/Cargo.toml --no-default-features --features $feature
+            if ($LASTEXITCODE -ne 0) { throw "luadebug build failed for $feature" }
+            $dir = if ($feature -eq "luajit") { "dist" } else { "dist/luadebug-$feature" }
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Copy-Item "lua-debug-module/target/release/luadebug.dll" "$dir/luadebug.dll"
+          }
+
       - name: Build all Lua versions (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -110,6 +122,20 @@ jobs:
             cp "target/release/lua-dap-server${{ matrix.ext }}" "dist/lua-dap-server-${feature}${{ matrix.ext }}"
           done
 
+      - name: Build luadebug module (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ runner.os == 'macOS' && '-C link-arg=-undefined -C link-arg=dynamic_lookup' || '' }}
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then lib=libluadebug.dylib; else lib=libluadebug.so; fi
+          for feature in luajit lua51 lua52 lua53 lua54 lua55; do
+            cargo build --release --manifest-path lua-debug-module/Cargo.toml --no-default-features --features "$feature"
+            if [ "$feature" = "luajit" ]; then dir=dist; else dir="dist/luadebug-$feature"; fi
+            mkdir -p "$dir"
+            cp "lua-debug-module/target/release/$lib" "$dir/luadebug.so"
+          done
+
       - name: Zip platform bundle
         shell: bash
         run: |
@@ -117,7 +143,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "../lua-dap-server-${{ matrix.os_name }}-${{ matrix.arch_name }}.zip" *
           else
-            zip "../lua-dap-server-${{ matrix.os_name }}-${{ matrix.arch_name }}.zip" *
+            zip -r "../lua-dap-server-${{ matrix.os_name }}-${{ matrix.arch_name }}.zip" *
           fi
 
       - uses: actions/upload-artifact@v4

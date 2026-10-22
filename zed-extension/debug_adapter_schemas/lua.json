@@ -7,11 +7,61 @@
     "request": {
       "type": "string",
       "enum": ["launch", "attach"],
-      "description": "Request type of this launch configuration"
+      "description": "launch: run a Lua script in the bundled lua-dap-server (program), or start a program that loads lua-debug-module, e.g. a LÖVE game (runtimeExecutable). attach: connect to a program that is already running and loaded lua-debug-module (require(\"luadebug\").start()); set port (and host)."
     },
     "program": {
       "type": "string",
-      "description": "Absolute path to the Lua file to debug"
+      "description": "launch: absolute path to the Lua file to debug"
+    },
+    "preset": {
+      "type": "string",
+      "enum": ["love"],
+      "description": "Defaults for a known host, for anything this entry doesn't set. love (LÖVE 11+): luaVersion luajit, sourceRoot ${workspaceFolder}, errorHandler [love.errorhandler, love.errhand], onTerminate love.event.quit; for launch, runtimeExecutable lovec (Windows) or love, with runtimeArgs [sourceRoot]."
+    },
+    "sourceRoot": {
+      "type": "string",
+      "description": "attach / runtimeExecutable: the folder the program loads its scripts from; relative chunk names (@main.lua) resolve against it, so breakpoints match"
+    },
+    "errorHandler": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ],
+      "description": "attach / runtimeExecutable: global function(s) the program calls as its xpcall message handler, e.g. [\"love.errorhandler\", \"love.errhand\"]. Each is wrapped, also if it's defined later, so uncaught errors stop in the debugger."
+    },
+    "onTerminate": {
+      "type": "string",
+      "description": "attach / runtimeExecutable: global function called to end the program when the debugger stops it, e.g. love.event.quit. Without one, the debugger raises an error in the program."
+    },
+    "runtimeExecutable": {
+      "type": "string",
+      "description": "launch: a program to start and debug instead of running program, e.g. \"lovec.exe\" for a LÖVE game. A bare name is looked up on PATH (including the user and system PATH). The program must load the debugger: if os.getenv(\"LUADEBUG_PORT\") then require(\"luadebug\").start() end"
+    },
+    "runtimeArgs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "launch: arguments for runtimeExecutable, e.g. [\"${workspaceFolder}\"] for the game folder"
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": ["string", "null"] },
+      "description": "launch with runtimeExecutable: extra environment variables for the program; null removes one"
+    },
+    "modulePath": {
+      "type": "string",
+      "description": "launch with runtimeExecutable: luadebug.dll/.so, or the folder holding it; it's put on the program's LUA_CPATH. Defaults to the dap.lua.binary folder, else the folder lua-dap-server is in."
+    },
+    "host": {
+      "type": "string",
+      "default": "127.0.0.1",
+      "description": "attach: IPv4 address the program's luadebug.start() listens on"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 8172,
+      "description": "attach: port the program's luadebug.start() listens on (start()'s default is 8172)"
     },
     "stopOnEntry": {
       "type": "boolean",
@@ -20,7 +70,7 @@
     },
     "cwd": {
       "type": "string",
-      "description": "Working directory for the script. Relative require()/io paths resolve against it. Defaults to the workspace folder."
+      "description": "Working directory for the script (or for runtimeExecutable). Relative require()/io paths resolve against it. Defaults to the workspace folder."
     },
     "args": {
       "type": "array",
@@ -56,5 +106,14 @@
       "type": "string",
       "description": "Advanced/testing: exact path to a lua-dap-server binary to launch directly, bypassing luaVersion resolution and the download/cache mechanism entirely. Mainly for testing a locally-built binary before it's part of a release."
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "request": { "const": "launch" } },
+        "not": { "anyOf": [{ "required": ["runtimeExecutable"] }, { "required": ["preset"] }] }
+      },
+      "then": { "required": ["program"] }
+    }
+  ]
 }

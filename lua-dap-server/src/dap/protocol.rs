@@ -246,6 +246,7 @@ impl PathList {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRequestArguments {
+    #[serde(default)]
     pub program: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub c_dll_dir: Option<String>,
@@ -261,4 +262,12 @@ pub struct LaunchRequestArguments {
     pub package_path: Option<PathList>,
     #[serde(default)]
     pub package_cpath: Option<PathList>,
+    #[serde(default)]
+    pub runtime_executable: Option<String>,
+    #[serde(default)]
+    pub runtime_args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, Option<String>>,
+    #[serde(default)]
+    pub module_path: Option<String>,
 }

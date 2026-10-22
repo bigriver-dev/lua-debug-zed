@@ -282,7 +282,10 @@ impl Evaluator {
     ) -> Result<Value> {
         let env = Self::build_frame_env(lua, frame_level, base_level)?;
         let chunk_code = format!("return ({})", expr);
-        lua.load(&chunk_code).set_environment(env).eval()
+        lua.load(&chunk_code)
+            .set_name("=(eval)")
+            .set_environment(env)
+            .eval()
     }
 
     /*
@@ -357,6 +360,9 @@ impl Evaluator {
         metatable.set("__index", lua.globals())?;
         env.set_metatable(Some(metatable))?;
 
+        for (name, value) in Self::collect_frame_upvalues(lua, frame_level, base_level)? {
+            env.set(name, value)?;
+        }
         for (name, value) in Self::collect_frame_locals(lua, frame_level, base_level)? {
             env.set(name, value)?;
         }
@@ -377,7 +383,12 @@ impl Evaluator {
             return false;
         };
         let chunk_code = format!("return ({})", expr);
-        match lua.load(&chunk_code).set_environment(env).eval::<Value>() {
+        match lua
+            .load(&chunk_code)
+            .set_name("=(condition)")
+            .set_environment(env)
+            .eval::<Value>()
+        {
             Ok(Value::Nil) | Ok(Value::Boolean(false)) => false,
             Ok(_) => true,
             Err(_) => false,

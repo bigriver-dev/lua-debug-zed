@@ -150,6 +150,14 @@ impl BreakpointRegistry {
     }
 
     /*
+     * drop every line breakpoint in every file
+     */
+    pub fn clear_all(&mut self) {
+        self.file_breakpoints.clear();
+        self.total = 0;
+    }
+
+    /*
      * True when nothing is armed
      */
     pub fn is_empty(&self) -> bool {

@@ -12,6 +12,7 @@
  */
 
 use crate::dap::protocol::*;
+use crate::dap::proxy::{self, LaunchedHost};
 use crate::dap::transport::DapTransport;
 use crate::engine::breakpoints::{
     BreakpointRegistry, FunctionBreakpointRegistry, HitCondition, SourceBp,
@@ -55,6 +56,21 @@ struct PendingLaunch {
     event_tx: UnboundedSender<RunnerEvent>,
 }
 
+/*
+ * Engine handles for a Lua state this process didn't create
+ */
+pub struct AttachedEngine {
+    pub breakpoints: Arc<Mutex<BreakpointRegistry>>,
+    pub function_breakpoints: Arc<Mutex<FunctionBreakpointRegistry>>,
+    pub exception_breakpoints_enabled: Arc<Mutex<bool>>,
+    pub control: Arc<RunControl>,
+    pub cmd_sender: Sender<ExecutionCommand>,
+    pub event_receiver: UnboundedReceiver<RunnerEvent>,
+    pub on_configured: Option<Sender<()>>,
+    // each client's attach arguments (its debug.json entry), for the host to apply
+    pub on_attach: Option<Sender<serde_json::Value>>,
+}
+
 pub struct DapSession<R, W> {
     transport: DapTransport<R, W>,
     seq: i64,
@@ -67,6 +83,10 @@ pub struct DapSession<R, W> {
     last_exception: Option<String>,
     control: Arc<RunControl>,
     paused: bool,
+    attached: bool,
+    on_configured: Option<Sender<()>>,
+    on_attach: Option<Sender<serde_json::Value>>,
+    launched_host: Option<LaunchedHost>,
 }
 
 impl<R, W> DapSession<R, W>
@@ -87,6 +107,78 @@ where
             last_exception: None,
             control: Arc::new(RunControl::default()),
             paused: false,
+            attached: false,
+            on_configured: None,
+            on_attach: None,
+            launched_host: None,
+        }
+    }
+
+    pub fn new_attached(reader: R, writer: W, engine: AttachedEngine) -> Self {
+        Self {
+            transport: DapTransport::new(reader, writer),
+            seq: 1,
+            breakpoints: engine.breakpoints,
+            function_breakpoints: engine.function_breakpoints,
+            exception_breakpoints_enabled: engine.exception_breakpoints_enabled,
+            cmd_sender: Some(engine.cmd_sender),
+            event_receiver: Some(engine.event_receiver),
+            pending_launch: None,
+            last_exception: None,
+            control: engine.control,
+            paused: false,
+            attached: true,
+            on_configured: engine.on_configured,
+            on_attach: engine.on_attach,
+            launched_host: None,
+        }
+    }
+
+    /*
+     * Gives the handles back once an attached session ends
+     */
+    pub fn into_engine(self) -> Option<AttachedEngine> {
+        Some(AttachedEngine {
+            breakpoints: self.breakpoints,
+            function_breakpoints: self.function_breakpoints,
+            exception_breakpoints_enabled: self.exception_breakpoints_enabled,
+            control: self.control,
+            cmd_sender: self.cmd_sender?,
+            event_receiver: self.event_receiver?,
+            on_configured: self.on_configured,
+            on_attach: self.on_attach,
+        })
+    }
+
+    /*
+     * Attached mode: asks the host to end itself or release it if its hung
+     */
+    fn request_host_exit(&mut self) {
+        self.control
+            .terminate_requested
+            .store(true, Ordering::Relaxed);
+        if self.paused {
+            self.paused = false;
+            if let Some(ref tx) = self.cmd_sender {
+                let _ = tx.send(ExecutionCommand::Continue);
+            }
+        }
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            std::process::exit(0);
+        });
+    }
+
+    fn detach(&mut self) {
+        self.control.client_attached.store(false, Ordering::Relaxed);
+        self.control.pause_requested.store(false, Ordering::Relaxed);
+        self.breakpoints.lock().clear_all();
+        self.function_breakpoints.lock().set_breakpoints(Vec::new());
+        if self.paused {
+            self.paused = false;
+            if let Some(ref tx) = self.cmd_sender {
+                let _ = tx.send(ExecutionCommand::Continue);
+            }
         }
     }
 
@@ -125,6 +217,14 @@ where
                     break;
                 }
             }
+
+            if let Some(host) = self.launched_host.take() {
+                return proxy::relay(&mut self.transport, host, self.seq).await;
+            }
+        }
+
+        if self.attached {
+            self.detach();
         }
 
         Ok(())
@@ -204,12 +304,69 @@ where
                 });
                 self.send_response(Response::success(request_seq, &command, Some(capabilities)))
                     .await?;
+            }
+
+            "attach" if self.attached => {
+                if let Some(tx) = &self.on_attach {
+                    let _ = tx.send(req.arguments.clone().unwrap_or_default());
+                }
+                self.send_response(Response::success(request_seq, &command, None))
+                    .await?;
                 self.send_event(Event::initialized()).await?;
             }
 
+            "launch" if self.attached => {
+                self.send_response(Response::error(
+                    request_seq,
+                    &command,
+                    "This debugger is running inside an existing Lua host; use \"request\": \"attach\"",
+                ))
+                .await?;
+            }
+
             "launch" => {
-                let args: LaunchRequestArguments =
-                    serde_json::from_value(req.arguments.unwrap_or_default())?;
+                let raw_args = req.arguments.unwrap_or_default();
+                let args: LaunchRequestArguments = serde_json::from_value(raw_args.clone())?;
+
+                if args
+                    .runtime_executable
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                {
+                    let mut console = Vec::new();
+                    let launched = proxy::launch(&args, &raw_args, &mut console).await;
+                    for (category, text) in console {
+                        let body = json!({ "category": category, "output": text });
+                        self.send_event(Event::new("output", Some(body))).await?;
+                    }
+                    match launched {
+                        Ok(host) => {
+                            self.launched_host = Some(host);
+                            self.send_response(Response::success(request_seq, &command, None))
+                                .await?;
+                            self.send_event(Event::initialized()).await?;
+                        }
+                        Err(err) => {
+                            self.send_response(Response::error(
+                                request_seq,
+                                &command,
+                                format!("{err:#}"),
+                            ))
+                            .await?;
+                        }
+                    }
+                    return Ok(false);
+                }
+
+                if args.program.trim().is_empty() {
+                    self.send_response(Response::error(
+                        request_seq,
+                        &command,
+                        "\"program\" is required: the Lua file to debug (or set \"runtimeExecutable\"                          to launch a program that loads lua-debug-module)",
+                    ))
+                    .await?;
+                    return Ok(false);
+                }
 
                 let (cmd_tx, cmd_rx) = unbounded();
                 let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -240,6 +397,7 @@ where
 
                 self.send_response(Response::success(request_seq, &command, None))
                     .await?;
+                self.send_event(Event::initialized()).await?;
             }
 
             "setBreakpoints" => {
@@ -303,6 +461,15 @@ where
 
                 let body = json!({ "breakpoints": verified_breakpoints });
                 self.send_response(Response::success(request_seq, &command, Some(body)))
+                    .await?;
+            }
+
+            "configurationDone" if self.attached => {
+                self.control.client_attached.store(true, Ordering::Relaxed);
+                if let Some(ready) = self.on_configured.take() {
+                    let _ = ready.send(());
+                }
+                self.send_response(Response::success(request_seq, &command, None))
                     .await?;
             }
 
@@ -669,6 +836,14 @@ where
                     .await?;
             }
 
+            // attached: ending the session means ending the host process
+            "terminate" if self.attached => {
+                self.request_host_exit();
+                self.send_response(Response::success(request_seq, &command, None))
+                    .await?;
+                self.send_event(Event::terminated()).await?;
+            }
+
             "terminate" => {
                 if self.pending_launch.take().is_some() || self.cmd_sender.is_none() {
                     self.send_event(Event::terminated()).await?;
@@ -730,6 +905,22 @@ where
                 }
                 self.send_response(Response::success(request_seq, &command, None))
                     .await?;
+            }
+
+            // attached: a plain disconnect detaches and leaves the host running
+            "disconnect" if self.attached => {
+                let terminate = req
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("terminateDebuggee"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if terminate {
+                    self.request_host_exit();
+                }
+                self.send_response(Response::success(request_seq, &command, None))
+                    .await?;
+                return Ok(true);
             }
 
             "disconnect" => {

@@ -1,0 +1,34 @@
+[package]
+name = "lua-debug-module"
+version = "0.1.0"
+edition = "2024"
+description = "lua-dap-server's debug engine as a native Lua module: debug any Lua host that can load C modules (LÖVE, game engines, embedded apps) from Zed while it runs"
+
+[workspace]
+
+[lib]
+# luadebug.dll / libluadebug.so
+name = "luadebug"
+crate-type = ["cdylib"]
+
+[features]
+default = ["luajit"] # LÖVE
+lua51 = ["mlua/lua51"]
+lua52 = ["mlua/lua52"]
+lua53 = ["mlua/lua53"]
+lua54 = ["mlua/lua54"]
+lua55 = ["mlua/lua55"]
+luajit = ["mlua/luajit"]
+
+[dependencies]
+mlua = { version = "0.12", features = ["module"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+tokio = { version = "1.38", features = ["full"] }
+anyhow = "1.0"
+
+# dap/proxy.rs
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

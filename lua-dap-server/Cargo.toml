@@ -27,3 +27,4 @@ mlua = { version = "0.12", features = ["vendored"] }
 
 [target.'cfg(windows)'.dependencies]
 mlua = { version = "0.12" }
+winreg = "0.55"

@@ -114,6 +114,75 @@ fn merge_search_paths(config: &mut json::Value, key: &str, global: Option<&json:
     }
 }
 
+/*
+ * `"preset"`: defaults for a known host, filled in where the entry leaves them unset.
+ * They're plain lua-debug-module options; the module itself knows no hosts.
+ */
+fn apply_preset(config: &mut json::Value) -> Result<(), String> {
+    let Some(preset) = config.get("preset").and_then(|v| v.as_str()) else {
+        return Ok(());
+    };
+    let is_unset = |config: &json::Value, key: &str| match config.get(key) {
+        None | Some(json::Value::Null) => true,
+        Some(json::Value::String(s)) => s.trim().is_empty(),
+        Some(_) => false,
+    };
+    match preset {
+        // LÖVE 11+: LuaJIT, the game folder holds main.lua, and these two globals
+        "love" => {
+            // a game's own love.errorhandler, else LÖVE's default love.errhand
+            let defaults = [
+                ("luaVersion", json::json!("luajit")),
+                ("sourceRoot", json::json!("${workspaceFolder}")),
+                ("errorHandler", json::json!(["love.errorhandler", "love.errhand"])),
+                ("onTerminate", json::json!("love.event.quit")),
+            ];
+            for (key, value) in defaults {
+                if is_unset(config, key) {
+                    config[key] = value;
+                }
+            }
+            let launch = config.get("request").and_then(|v| v.as_str()) != Some("attach");
+            if launch && is_unset(config, "program") && is_unset(config, "runtimeExecutable") {
+                // lovec is the console build on Windows, so print() reaches Zed
+                let (os, _) = zed::current_platform();
+                let exe = if matches!(os, zed::Os::Windows) { "lovec" } else { "love" };
+                config["runtimeExecutable"] = json::Value::from(exe);
+                if config.get("runtimeArgs").is_none() {
+                    config["runtimeArgs"] = json::json!([config["sourceRoot"].clone()]);
+                }
+            }
+            Ok(())
+        }
+        other => Err(format!("Unknown \"preset\": \"{other}\" (known: \"love\")")),
+    }
+}
+
+const ATTACH_HELP: &str = "\"request\": \"attach\" connects to a Lua program that loaded \
+    lua-debug-module (require(\"luadebug\").start()). Add the port it listens on, e.g. \
+    \"port\": 8172 (start()'s default). To attach to some other DAP server, use \
+    \"tcp_connection\" instead.";
+
+// Debug a DAP server that's already running (no adapter process to launch).
+fn connect_to(
+    connection: zed::TcpArguments,
+    cwd: String,
+    configuration: String,
+    request: zed::StartDebuggingRequestArgumentsRequest,
+) -> zed::DebugAdapterBinary {
+    zed::DebugAdapterBinary {
+        command: None,
+        arguments: vec![],
+        cwd: Some(cwd),
+        envs: vec![],
+        connection: Some(connection),
+        request_args: zed::StartDebuggingRequestArguments {
+            configuration,
+            request,
+        },
+    }
+}
+
 impl zed::Extension for LuaDebugExtension {
     fn new() -> Self {
         Self
@@ -138,6 +207,24 @@ impl zed::Extension for LuaDebugExtension {
             merge_search_paths(&mut parsed_config, key, global);
         }
 
+        apply_preset(&mut parsed_config)?;
+
+        // runtimeExecutable: the launched program loads luadebug.dll/.so
+        // deafult dap.lua.binary folder
+        let launches_host = parsed_config
+            .get("runtimeExecutable")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_module_path = parsed_config
+            .get("modulePath")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        if launches_host && !has_module_path {
+            if let Some(dir) = &user_provided_debug_adapter_path {
+                parsed_config["modulePath"] = json::Value::String(dir.clone());
+            }
+        }
+
         substitute_workspace_folder(&mut parsed_config, &root_path);
         let resolved_config = parsed_config.to_string();
 
@@ -152,35 +239,37 @@ impl zed::Extension for LuaDebugExtension {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // (require("luadebug").start()), listening on host:port
+        let attach_host = parsed_config
+            .get("host")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let attach_port = parsed_config.get("port").and_then(|v| v.as_u64());
+
         let request = self.dap_request_kind(adapter_name, parsed_config)?;
 
         // debug.json tcp_connection` support; connect to a DAP instance elsewhere
         if let Some(template) = config.tcp_connection.clone() {
             let connection = zed::resolve_tcp_template(template)?;
-            return Ok(zed::DebugAdapterBinary {
-                command: None,
-                arguments: vec![],
-                cwd: Some(root_path),
-                envs: vec![],
-                connection: Some(connection),
-                request_args: zed::StartDebuggingRequestArguments {
-                    configuration: resolved_config,
-                    request,
-                },
-            });
+            return Ok(connect_to(connection, root_path, resolved_config, request));
         }
 
-        // An attach config that reaches here is missing its `tcp_connection`
         if matches!(request, zed::StartDebuggingRequestArgumentsRequest::Attach) {
-            return Err(
-                "This config asks to attach, but has no `tcp_connection`, so Zed \
-                would launch the bundled lua-dap-server — which only supports `launch`. \
-                To attach to a DAP server running elsewhere (e.g. esi-dap inside \
-                Inmation), add: \"tcp_connection\": { \"host\": \"127.0.0.1\", \"port\": 4711 }. \
-                If you picked this from .vscode/launch.json, choose the .zed/debug.json \
-                entry instead — `debugServer` is a VS Code property and Zed ignores it."
-                    .to_string(),
-            );
+            let port = attach_port
+                .and_then(|p| u16::try_from(p).ok())
+                .ok_or_else(|| ATTACH_HELP.to_string())?;
+            let host = match attach_host.as_deref() {
+                None | Some("localhost") => std::net::Ipv4Addr::LOCALHOST,
+                Some(h) => h.parse().map_err(|_| {
+                    format!("\"host\": \"{h}\" must be an IPv4 address, e.g. 127.0.0.1")
+                })?,
+            };
+            let connection = zed::resolve_tcp_template(zed::TcpArgumentsTemplate {
+                host: Some(u32::from(host)),
+                port: Some(port),
+                timeout: None,
+            })?;
+            return Ok(connect_to(connection, root_path, resolved_config, request));
         }
 
         let command = if let Some(path) = debug_server_path {
@@ -232,9 +321,11 @@ impl zed::Extension for LuaDebugExtension {
             zed::DebugRequest::Launch(launch) => launch,
             zed::DebugRequest::Attach(_) => {
                 return Err(
-                       "Lua Debug Adapter only supports launching a script, not attaching to an existing process"
-                           .to_string(),
-                   );
+                    "Picking a process to attach to isn't supported. To debug a running Lua \
+                    program, have it load lua-debug-module (require(\"luadebug\").start()) and \
+                    add a .zed/debug.json entry with \"request\": \"attach\" and \"port\": 8172."
+                        .to_string(),
+                );
             }
         };
 
