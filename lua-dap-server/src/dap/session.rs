@@ -23,7 +23,7 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::Mutex;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -44,6 +44,41 @@ fn trace(direction: &str, msg: &str) {
     {
         let _ = writeln!(f, "{direction}: {msg}");
     }
+}
+
+/*
+ * Fails the launch with a user readable error message
+ */
+fn check_program(program: &str, cwd: Option<&str>) -> Result<(), String> {
+    let given = Path::new(program);
+    let mut path = std::env::current_dir().unwrap_or_default();
+    if let Some(dir) = cwd {
+        path.push(dir);
+    }
+    path.push(given);
+    // Windows: "game/main.lua" -> "game\main.lua"
+    let path: PathBuf = path.components().collect();
+    if path.is_file() {
+        return Ok(());
+    }
+
+    let shown = if given.is_absolute() {
+        format!("'{program}'")
+    } else {
+        format!("'{program}' (resolved to '{}')", path.display())
+    };
+    if path.is_dir() {
+        return Err(format!(
+            "\"program\" {shown} is a folder; it should be the Lua file to run, e.g. \
+             \"${{workspaceFolder}}/main.lua\""
+        ));
+    }
+    if path.extension().is_none() && path.with_extension("lua").is_file() {
+        return Err(format!(
+            "\"program\" {shown} doesn't exist. Did you mean '{program}.lua'?"
+        ));
+    }
+    Err(format!("\"program\" {shown} doesn't exist"))
 }
 
 struct PendingLaunch {
@@ -362,9 +397,16 @@ where
                     self.send_response(Response::error(
                         request_seq,
                         &command,
-                        "\"program\" is required: the Lua file to debug (or set \"runtimeExecutable\"                          to launch a program that loads lua-debug-module)",
+                        "\"program\" is required: the Lua file to debug (or set \"runtimeExecutable\" \
+                         to launch a program that loads lua-debug-module)",
                     ))
                     .await?;
+                    return Ok(false);
+                }
+
+                if let Err(message) = check_program(&args.program, args.cwd.as_deref()) {
+                    self.send_response(Response::error(request_seq, &command, message))
+                        .await?;
                     return Ok(false);
                 }
 

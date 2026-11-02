@@ -247,8 +247,10 @@ impl LuaRunner {
             }
 
             // Load and execute target Lua script inside this process
-            let code = std::fs::read_to_string(script_path)
-                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+            let code = std::fs::read_to_string(script_path).map_err(|e| {
+                let message = format!("can't read program '{}': {e}", script_path.display());
+                mlua::Error::ExternalError(Arc::new(std::io::Error::new(e.kind(), message)))
+            })?;
 
             let chunk_fn = self
                 .lua
