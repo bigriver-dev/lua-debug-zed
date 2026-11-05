@@ -42,7 +42,20 @@ if (-not (Test-Path (Join-Path $CacheDir "src"))) {
     $tarballDir = New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot ".lua-src-cache") | Select-Object -ExpandProperty FullName
     $tarball = Join-Path $tarballDir "lua-$FullVersion.tar.gz"
     if (-not (Test-Path $tarball)) {
-        Invoke-WebRequest -Uri "https://www.lua.org/ftp/lua-$FullVersion.tar.gz" -OutFile $tarball
+        # lua.org is often slow to answer; retry before giving up
+        $url = "https://www.lua.org/ftp/lua-$FullVersion.tar.gz"
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $tarball -TimeoutSec 60
+                break
+            }
+            catch {
+                Remove-Item $tarball -ErrorAction SilentlyContinue
+                if ($attempt -ge 5) { throw "Couldn't download $url after $attempt attempts: $_" }
+                Write-Host "Download failed ($_); retrying in $(5 * $attempt)s..."
+                Start-Sleep -Seconds (5 * $attempt)
+            }
+        }
     }
     & "$env:SystemRoot\System32\tar.exe" -xzf $tarball -C $tarballDir
     if ($LASTEXITCODE -ne 0) { throw "Failed to extract lua-$FullVersion.tar.gz" }

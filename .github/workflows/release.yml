@@ -82,7 +82,9 @@ jobs:
               $ver = $feature.Substring(3)
               New-Item -ItemType Directory -Force -Path "dll-build/$feature" | Out-Null
               $out = & pwsh -File scripts/windows/build-lua-dll.ps1 -LuaVersion $ver -OutDir "dll-build/$feature"
+              $scriptExit = $LASTEXITCODE
               $out | Write-Host
+              if ($scriptExit -ne 0) { throw "build-lua-dll.ps1 failed for $feature" }
               $luaLib = (($out | Select-String '^LUA_LIB=').Line -split '=', 2)[1]
               $luaLibName = (($out | Select-String '^LUA_LIB_NAME=').Line -split '=', 2)[1]
               $env:LUA_LIB = $luaLib
