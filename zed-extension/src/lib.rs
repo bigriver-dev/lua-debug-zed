@@ -3,6 +3,19 @@ use zed_extension_api::{self as zed};
 
 struct LuaDebugExtension;
 const RELEASE_REPO: &str = "bigriver-dev/lua-debug-zed";
+const EXTENSION_TOML: &str = include_str!("../extension.toml");
+
+// fetch version from extension.toml
+fn extension_version() -> Option<&'static str> {
+    EXTENSION_TOML.lines().find_map(|line| {
+        let value = line
+            .strip_prefix("version")?
+            .trim_start()
+            .strip_prefix('=')?
+            .trim();
+        value.strip_prefix('"')?.strip_suffix('"')
+    })
+}
 
 fn resolve_binary(lua_version: &str) -> Result<String, String> {
     let (os, arch) = zed::current_platform();
@@ -23,13 +36,19 @@ fn resolve_binary(lua_version: &str) -> Result<String, String> {
     };
     let feature = lua_feature_name(lua_version);
 
-    let release = zed::latest_github_release(
-        RELEASE_REPO,
-        zed::GithubReleaseOptions {
-            require_assets: true,
-            pre_release: false,
-        },
-    )?;
+    let tagged = extension_version()
+        .ok_or_else(|| "no version in extension.toml".to_string())
+        .and_then(|v| zed::github_release_by_tag_name(RELEASE_REPO, &format!("v{v}")));
+    let release = match tagged {
+        Ok(release) => release,
+        Err(_) => zed::latest_github_release(
+            RELEASE_REPO,
+            zed::GithubReleaseOptions {
+                require_assets: true,
+                pre_release: false,
+            },
+        )?,
+    };
 
     let bundle_asset_name = format!("lua-dap-server-{os_name}-{arch_name}.zip");
     let extract_dir = format!("lua-dap-server-{}-{os_name}-{arch_name}", release.version);
@@ -134,7 +153,10 @@ fn apply_preset(config: &mut json::Value) -> Result<(), String> {
             let defaults = [
                 ("luaVersion", json::json!("luajit")),
                 ("sourceRoot", json::json!("${workspaceFolder}")),
-                ("errorHandler", json::json!(["love.errorhandler", "love.errhand"])),
+                (
+                    "errorHandler",
+                    json::json!(["love.errorhandler", "love.errhand"]),
+                ),
                 ("onTerminate", json::json!("love.event.quit")),
             ];
             for (key, value) in defaults {
@@ -146,7 +168,11 @@ fn apply_preset(config: &mut json::Value) -> Result<(), String> {
             if launch && is_unset(config, "program") && is_unset(config, "runtimeExecutable") {
                 // lovec is the console build on Windows, so print() reaches Zed
                 let (os, _) = zed::current_platform();
-                let exe = if matches!(os, zed::Os::Windows) { "lovec" } else { "love" };
+                let exe = if matches!(os, zed::Os::Windows) {
+                    "lovec"
+                } else {
+                    "love"
+                };
                 config["runtimeExecutable"] = json::Value::from(exe);
                 if config.get("runtimeArgs").is_none() {
                     config["runtimeArgs"] = json::json!([config["sourceRoot"].clone()]);

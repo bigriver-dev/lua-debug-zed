@@ -158,7 +158,7 @@ jobs:
           shell: bash
           run: |
             cd zed-extension
-            zip -r "../lua-debugger-extension-source.zip" extension.toml Cargo.toml Cargo.lock src debug_adapter_schemas
+            zip -r "../lua-debugger-extension-source.zip" extension.toml Cargo.toml LICENSE src debug_adapter_schemas
 
         - uses: actions/upload-artifact@v4
           with:

@@ -1,5 +1,4 @@
 target
-Cargo.lock
 lua-debug-agent
 zed-extension/extension.wasm
 lua-dap-server-trace.log
